@@ -170,6 +170,234 @@ struct TradierProvider: QuoteDataProvider {
     }
 }
 
+/// Finnhub-backed provider for quotes (BYO key). Option chains are not provided here; fall back to Yahoo.
+struct FinnhubProvider: QuoteDataProvider {
+    private let token: String
+
+    init(token: String) {
+        self.token = token
+    }
+
+    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
+        var comps = URLComponents(string: "https://finnhub.io")
+        comps?.path = path
+        if !queryItems.isEmpty { comps?.queryItems = queryItems }
+        guard let url = comps?.url else { throw QuoteService.QuoteError.invalidSymbol }
+        var req = URLRequest(url: url)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 12
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        return req
+    }
+
+    func fetchDelayedPrice(symbol: String) async throws -> Double {
+        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
+        let req = try makeRequest(path: "/api/v1/quote", queryItems: [
+            URLQueryItem(name: "symbol", value: trimmed.uppercased()),
+            URLQueryItem(name: "token", value: token)
+        ])
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
+            guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
+        }
+        struct FHQuote: Decodable {
+            let c: Double?   // current price
+            let pc: Double?  // previous close
+            let o: Double?   // open
+            let lp: Double?  // last price (some feeds)
+        }
+        do {
+            let q = try JSONDecoder().decode(FHQuote.self, from: data)
+            if let p = q.c ?? q.lp ?? q.o ?? q.pc { return p }
+            throw QuoteService.QuoteError.noData
+        } catch is DecodingError {
+            throw QuoteService.QuoteError.parse
+        }
+    }
+
+    func fetchOptionChain(symbol: String, expiration: Date?) async throws -> OptionChainData {
+        // Finnhub free tier does not provide full option chains in a way compatible here.
+        // Signal unauthorized so QuoteService falls back to Yahoo Finance.
+        throw QuoteService.QuoteError.unauthorized
+    }
+
+    /// Validate the current token by making a lightweight authorized request.
+    /// Returns true if the token appears valid (HTTP 200 and decodable), false otherwise.
+    func validateToken() async -> Bool {
+        do {
+            let req = try makeRequest(path: "/api/v1/quote", queryItems: [
+                URLQueryItem(name: "symbol", value: "AAPL"),
+                URLQueryItem(name: "token", value: token)
+            ])
+            let (data, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 { return false }
+            // Basic decode sanity check
+            struct FHQuote: Decodable { let c: Double? }
+            _ = try? JSONDecoder().decode(FHQuote.self, from: data)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Convenience static helper to validate a token without constructing the provider elsewhere.
+    static func validateToken(token: String) async -> Bool {
+        let provider = FinnhubProvider(token: token)
+        return await provider.validateToken()
+    }
+}
+
+/// Polygon-backed provider for quotes (BYO key). Option chains are not provided here; fall back to Yahoo.
+struct PolygonProvider: QuoteDataProvider {
+    private let token: String
+
+    init(token: String) {
+        self.token = token
+    }
+
+    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
+        var comps = URLComponents(string: "https://api.polygon.io")
+        comps?.path = path
+        if !queryItems.isEmpty { comps?.queryItems = queryItems }
+        guard let url = comps?.url else { throw QuoteService.QuoteError.invalidSymbol }
+        var req = URLRequest(url: url)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.timeoutInterval = 12
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        return req
+    }
+
+    func fetchDelayedPrice(symbol: String) async throws -> Double {
+        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
+        // Use snapshot endpoint for a recent trade or day prices.
+        let req = try makeRequest(path: "/v2/snapshot/locale/us/markets/stocks/tickers/\(trimmed.uppercased())", queryItems: [
+            URLQueryItem(name: "apiKey", value: token)
+        ])
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
+            guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
+        }
+        struct SnapshotRoot: Decodable { let ticker: SnapshotTicker? }
+        struct SnapshotTicker: Decodable { let lastTrade: SnapshotTrade?; let day: SnapshotDay? }
+        struct SnapshotTrade: Decodable { let p: Double? }
+        struct SnapshotDay: Decodable { let c: Double?; let o: Double? }
+        do {
+            let snap = try JSONDecoder().decode(SnapshotRoot.self, from: data)
+            if let p = snap.ticker?.lastTrade?.p ?? snap.ticker?.day?.c ?? snap.ticker?.day?.o { return p }
+            throw QuoteService.QuoteError.noData
+        } catch is DecodingError {
+            throw QuoteService.QuoteError.parse
+        }
+    }
+
+    func fetchOptionChain(symbol: String, expiration: Date?) async throws -> OptionChainData {
+        // Polygon chain access requires paid tiers and differs from our model; fall back to Yahoo.
+        throw QuoteService.QuoteError.unauthorized
+    }
+
+    /// Validate the current token by making a lightweight authorized request.
+    func validateToken() async -> Bool {
+        do {
+            let req = try makeRequest(path: "/v2/snapshot/locale/us/markets/stocks/tickers/AAPL", queryItems: [
+                URLQueryItem(name: "apiKey", value: token)
+            ])
+            let (data, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse, http.statusCode != 200 { return false }
+            struct SnapshotRoot: Decodable { let ticker: SnapshotTicker? }
+            struct SnapshotTicker: Decodable { let lastTrade: SnapshotTrade? }
+            struct SnapshotTrade: Decodable { let p: Double? }
+            _ = try? JSONDecoder().decode(SnapshotRoot.self, from: data)
+            return true
+        } catch { return false }
+    }
+
+    static func validateToken(token: String) async -> Bool {
+        let provider = PolygonProvider(token: token)
+        return await provider.validateToken()
+    }
+}
+
+/// TradeStation-backed provider for quotes (BYO key). Option chains fall back to Yahoo for now.
+struct TradeStationProvider: QuoteDataProvider {
+    private let token: String
+
+    init(token: String) {
+        self.token = token
+    }
+
+    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
+        var comps = URLComponents(string: "https://api.tradestation.com")
+        comps?.path = path
+        if !queryItems.isEmpty { comps?.queryItems = queryItems }
+        guard let url = comps?.url else { throw QuoteService.QuoteError.invalidSymbol }
+        var req = URLRequest(url: url)
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.timeoutInterval = 12
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        return req
+    }
+
+    func fetchDelayedPrice(symbol: String) async throws -> Double {
+        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
+        // TradeStation quotes endpoint (v2/v3). Using a tolerant decoder for typical fields.
+        let req = try makeRequest(path: "/v3/marketdata/quotes", queryItems: [
+            URLQueryItem(name: "symbols", value: trimmed.uppercased())
+        ])
+        let (data, response) = try await URLSession.shared.data(for: req)
+        if let http = response as? HTTPURLResponse {
+            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
+            guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
+        }
+        struct TSQuotesRoot: Decodable { let Quotes: [TSQuote]? }
+        struct TSQuote: Decodable {
+            let Last: Double?
+            let Close: Double?
+            let Bid: Double?
+            let Ask: Double?
+        }
+        do {
+            let root = try JSONDecoder().decode(TSQuotesRoot.self, from: data)
+            if let q = root.Quotes?.first {
+                if let p = q.Last ?? q.Close { return p }
+                if let b = q.Bid, let a = q.Ask, b > 0, a > 0 { return (b + a) / 2 }
+            }
+            throw QuoteService.QuoteError.noData
+        } catch is DecodingError {
+            throw QuoteService.QuoteError.parse
+        }
+    }
+
+    func fetchOptionChain(symbol: String, expiration: Date?) async throws -> OptionChainData {
+        // Not implemented for TradeStation in this version; fall back to Yahoo by signaling unauthorized.
+        throw QuoteService.QuoteError.unauthorized
+    }
+
+    /// Validate the current token by making a lightweight authorized request.
+    func validateToken() async -> Bool {
+        do {
+            let req = try makeRequest(path: "/v3/marketdata/quotes", queryItems: [
+                URLQueryItem(name: "symbols", value: "AAPL")
+            ])
+            let (_, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse {
+                return http.statusCode == 200
+            }
+            return false
+        } catch { return false }
+    }
+
+    static func validateToken(token: String) async -> Bool {
+        let provider = TradeStationProvider(token: token)
+        return await provider.validateToken()
+    }
+}
+
 actor QuoteService {
     private let provider: QuoteDataProvider?
 
@@ -188,7 +416,7 @@ actor QuoteService {
             switch self {
             case .invalidSymbol: return "Invalid symbol."
             case .network: return "Network error."
-            case .unauthorized: return "Option chain unavailable (blocked by data source). Try again later or use manual strikes."
+            case .unauthorized: return "Option chain not available. Enter strikes manually."
             case .parse: return "Failed to parse data."
             case .noData: return "No data available."
             }
@@ -418,15 +646,15 @@ actor QuoteService {
 
 // MARK: - Yahoo Finance JSON models (minimal)
 
-@preconcurrency private struct YFQuoteRoot: Decodable {
+private nonisolated struct YFQuoteRoot: Decodable {
     let quoteResponse: YFQuoteResponse
 }
 
-@preconcurrency private struct YFQuoteResponse: Decodable {
+private nonisolated struct YFQuoteResponse: Decodable {
     let result: [YFQuoteItem]
 }
 
-@preconcurrency private struct YFQuoteItem: Decodable {
+private nonisolated struct YFQuoteItem: Decodable {
     let regularMarketPrice: Double?
     let postMarketPrice: Double?
     let regularMarketOpen: Double?
@@ -436,26 +664,26 @@ actor QuoteService {
     let ask: Double?
 }
 
-@preconcurrency private struct YFOptionsRoot: Decodable {
+private nonisolated struct YFOptionsRoot: Decodable {
     let optionChain: YFOptionChain
 }
 
-@preconcurrency private struct YFOptionChain: Decodable {
+private nonisolated struct YFOptionChain: Decodable {
     let result: [YFChainResult]
 }
 
-@preconcurrency private struct YFChainResult: Decodable {
+private nonisolated struct YFChainResult: Decodable {
     let expirationDates: [Int]?
     let strikes: [Double]?
     let options: [YFChainOptions]
 }
 
-@preconcurrency private struct YFChainOptions: Decodable {
+private nonisolated struct YFChainOptions: Decodable {
     let calls: [YFContract]?
     let puts: [YFContract]?
 }
 
-@preconcurrency private struct YFDoubleOrObject: Decodable {
+private nonisolated struct YFDoubleOrObject: Decodable {
     let raw: Double?
     let double: Double?
 
@@ -476,44 +704,44 @@ actor QuoteService {
     }
 }
 
-@preconcurrency private struct YFContract: Decodable {
+private nonisolated struct YFContract: Decodable {
     let strike: YFDoubleOrObject?
 }
-@preconcurrency private struct YFChartRoot: Decodable {
+private nonisolated struct YFChartRoot: Decodable {
     let chart: YFChart
 }
 
-@preconcurrency private struct YFChart: Decodable {
+private nonisolated struct YFChart: Decodable {
     let result: [YFChartResult]?
 }
 
-@preconcurrency private struct YFChartResult: Decodable {
+private nonisolated struct YFChartResult: Decodable {
     let meta: YFChartMeta?
     let indicators: YFChartIndicators?
 }
 
-@preconcurrency private struct YFChartMeta: Decodable {
+private nonisolated struct YFChartMeta: Decodable {
     let regularMarketPrice: Double?
     let previousClose: Double?
 }
 
-@preconcurrency private struct YFChartIndicators: Decodable {
+private nonisolated struct YFChartIndicators: Decodable {
     let quote: [YFChartQuote]?
 }
 
-@preconcurrency private struct YFChartQuote: Decodable {
+private nonisolated struct YFChartQuote: Decodable {
     let close: [Double?]?
 }
 
 // MARK: - Tradier JSON models (minimal)
-@preconcurrency private struct TradierQuotesRoot: Decodable {
+private nonisolated struct TradierQuotesRoot: Decodable {
     let quotes: TradierQuotesInner?
 }
-@preconcurrency private struct TradierQuotesInner: Decodable {
+private nonisolated struct TradierQuotesInner: Decodable {
     let quote: TradierQuoteEither
 }
 
-@preconcurrency private enum TradierQuoteEither: Decodable {
+private nonisolated enum TradierQuoteEither: Decodable {
     case one(TradierQuote)
     case many([TradierQuote])
 
@@ -531,30 +759,30 @@ actor QuoteService {
     }
 }
 
-@preconcurrency private struct TradierQuote: Decodable {
+private nonisolated struct TradierQuote: Decodable {
     let last: Double?
     let close: Double?
     let bid: Double?
     let ask: Double?
 }
 
-@preconcurrency private struct TradierExpirationsRoot: Decodable {
+private nonisolated struct TradierExpirationsRoot: Decodable {
     let expirations: TradierExpirations?
 }
 
-@preconcurrency private struct TradierExpirations: Decodable {
+private nonisolated struct TradierExpirations: Decodable {
     let date: [String]?
 }
 
-@preconcurrency private struct TradierChainsRoot: Decodable {
+private nonisolated struct TradierChainsRoot: Decodable {
     let options: TradierOptions?
 }
 
-@preconcurrency private struct TradierOptions: Decodable {
+private nonisolated struct TradierOptions: Decodable {
     let option: [TradierOption]?
 }
 
-@preconcurrency private struct TradierOption: Decodable {
+private nonisolated struct TradierOption: Decodable {
     let strike: Double?
     let option_type: String?
 }

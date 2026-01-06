@@ -58,5 +58,7 @@ extension KeychainHelper {
         static let tradierToken = "tradier.token"
         static let finnhubToken = "finnhub.token"
         static let polygonToken = "polygon.token"
+        static let tradestationToken = "tradestation.token"
     }
 }
+
