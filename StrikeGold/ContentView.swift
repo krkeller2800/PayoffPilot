@@ -25,6 +25,7 @@ struct ContentView: View {
             var premium: Double
             var contracts: Int
             var multiplier: Double
+            // hello
         }
         var id: UUID = UUID()
         var createdAt: Date = Date()
