@@ -1,6 +1,6 @@
 //
 //  OptionType.swift
-//  PayoffPilot
+//  StrikeGold
 //
 //  Created by Karl Keller on 12/30/25.
 //
@@ -112,8 +112,9 @@ enum OptionsFormat {
     static func number(_ value: Double) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 2
         formatter.maximumFractionDigits = 2
-        return formatter.string(from: NSNumber(value: value)) ?? "0"
+        return formatter.string(from: NSNumber(value: value)) ?? "0.00"
     }
 }
 /// Side of an option leg

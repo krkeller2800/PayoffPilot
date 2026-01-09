@@ -1,6 +1,6 @@
 //
 //  GradientAdButtonStyle.swift
-//  PayoffPilot
+//  StrikeGold
 //
 //  Created by Karl Keller on 12/31/25.
 //

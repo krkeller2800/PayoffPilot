@@ -1,6 +1,6 @@
 //
 //  QuoteService.swift
-//  PayoffPilot
+//  StrikeGold
 //
 //  Created by Assistant on 12/31/25.
 //
@@ -10,10 +10,29 @@ import Foundation
 // A lightweight, no-cost delayed quote and options chain fetcher using Yahoo Finance public endpoints.
 // For educational use only. This is not guaranteed for production trading apps.
 
+struct OptionContract: Hashable {
+    enum Kind: String { case call, put }
+    let kind: Kind
+    let strike: Double
+    let bid: Double?
+    let ask: Double?
+    let last: Double?
+    var mid: Double? {
+        if let b = bid, let a = ask, b > 0 && a > 0 {
+            return (b + a) / 2.0
+        }
+        if let b = bid, b > 0 { return b }
+        if let a = ask, a > 0 { return a }
+        return last
+    }
+}
+
 struct OptionChainData {
     let expirations: [Date]
     let callStrikes: [Double]
     let putStrikes: [Double]
+    let callContracts: [OptionContract]
+    let putContracts: [OptionContract]
 }
 
 /// Abstraction for pluggable quote/chain providers.
@@ -99,6 +118,14 @@ struct TradierProvider: QuoteDataProvider {
             URLQueryItem(name: "strikes", value: "false")
         ])
         let (expData, expResp) = try await URLSession.shared.data(for: expReq)
+        #if DEBUG
+        if let http = expResp as? HTTPURLResponse {
+            let body = String(data: expData.prefix(400), encoding: .utf8) ?? "(binary)"
+            print("[DEBUG][Tradier] Expirations URL:", expReq.url?.absoluteString ?? "?")
+            print("[DEBUG][Tradier] Expirations status:", http.statusCode)
+            print("[DEBUG][Tradier] Expirations body prefix:\n", body)
+        }
+        #endif
         if let http = expResp as? HTTPURLResponse {
             if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
             guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
@@ -120,12 +147,22 @@ struct TradierProvider: QuoteDataProvider {
 
         var callStrikes: [Double] = []
         var putStrikes: [Double] = []
+        var callContracts: [OptionContract] = []
+        var putContracts: [OptionContract] = []
         if let expStr = expToUseString {
             let chainReq = try makeRequest(path: "/v1/markets/options/chains", queryItems: [
                 URLQueryItem(name: "symbol", value: trimmed.uppercased()),
                 URLQueryItem(name: "expiration", value: expStr)
             ])
             let (chainData, chainResp) = try await URLSession.shared.data(for: chainReq)
+            #if DEBUG
+            if let http = chainResp as? HTTPURLResponse {
+                let body = String(data: chainData.prefix(400), encoding: .utf8) ?? "(binary)"
+                print("[DEBUG][Tradier] Chains URL:", chainReq.url?.absoluteString ?? "?")
+                print("[DEBUG][Tradier] Chains status:", http.statusCode)
+                print("[DEBUG][Tradier] Chains body prefix:\n", body)
+            }
+            #endif
             if let http = chainResp as? HTTPURLResponse {
                 if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
                 guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
@@ -133,8 +170,18 @@ struct TradierProvider: QuoteDataProvider {
             do {
                 let chain = try JSONDecoder().decode(TradierChainsRoot.self, from: chainData)
                 let options = chain.options?.option ?? []
-                let calls = Set(options.filter { ($0.option_type ?? "").lowercased() == "call" }.compactMap { $0.strike })
-                let puts  = Set(options.filter { ($0.option_type ?? "").lowercased() == "put"  }.compactMap { $0.strike })
+                let callsList = options.filter { ($0.option_type ?? "").lowercased() == "call" }
+                let putsList  = options.filter { ($0.option_type ?? "").lowercased() == "put" }
+                callContracts = callsList.compactMap { o in
+                    guard let k = o.strike else { return nil }
+                    return OptionContract(kind: .call, strike: k, bid: o.bid, ask: o.ask, last: o.last)
+                }.sorted { $0.strike < $1.strike }
+                putContracts = putsList.compactMap { o in
+                    guard let k = o.strike else { return nil }
+                    return OptionContract(kind: .put, strike: k, bid: o.bid, ask: o.ask, last: o.last)
+                }.sorted { $0.strike < $1.strike }
+                let calls = Set(callsList.compactMap { $0.strike })
+                let puts  = Set(putsList.compactMap { $0.strike })
                 callStrikes = calls.sorted()
                 putStrikes  = puts.sorted()
             } catch is DecodingError {
@@ -142,7 +189,7 @@ struct TradierProvider: QuoteDataProvider {
             }
         }
 
-        return OptionChainData(expirations: expirations, callStrikes: callStrikes, putStrikes: putStrikes)
+        return OptionChainData(expirations: expirations, callStrikes: callStrikes, putStrikes: putStrikes, callContracts: callContracts, putContracts: putContracts)
     }
 
     /// Validate the current token by making a lightweight authorized request.
@@ -566,29 +613,73 @@ actor QuoteService {
         let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw QuoteError.invalidSymbol }
 
+        #if DEBUG
+        if provider == nil {
+            print("[DEBUG][QuoteService] No custom provider. Falling back to Yahoo for options.")
+        } else {
+            print("[DEBUG][QuoteService] Using custom provider for options.")
+        }
+        #endif
+
         if let provider {
             do {
-                return try await provider.fetchOptionChain(symbol: trimmed, expiration: expiration)
+                let data = try await provider.fetchOptionChain(symbol: trimmed, expiration: expiration)
+                #if DEBUG
+                let pricedProvider = (data.callContracts + data.putContracts).filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
+                print("[DEBUG][QuoteService] Provider chain -> expirations: \(data.expirations.count), calls: \(data.callContracts.count), puts: \(data.putContracts.count), priced: \(pricedProvider.count)")
+                if let ex = data.expirations.first { print("[DEBUG][QuoteService] Provider first expiration: \(ex)") }
+                if let sample = data.callContracts.first { print("[DEBUG][QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: sample.mid))") }
+                #endif
+                // If provider returned contracts with any pricing, use it; otherwise fall back to Yahoo
+                let hasAnyPrice = !pricedProvider.isEmpty
+                if hasAnyPrice || (!data.callContracts.isEmpty || !data.putContracts.isEmpty) {
+                    return data
+                }
+                // else: fall through to Yahoo fallback below
             } catch {
                 // fall back to Yahoo Finance
             }
         }
 
-        func parseChain(_ data: Data) throws -> (expirations: [Date], callStrikes: [Double], putStrikes: [Double]) {
+        func parseChain(_ data: Data) throws -> (expirations: [Date], callStrikes: [Double], putStrikes: [Double], callContracts: [OptionContract], putContracts: [OptionContract]) {
             let decoded = try JSONDecoder().decode(YFOptionsRoot.self, from: data)
             guard let result = decoded.optionChain.result.first else {
-                return ([], [], [])
+                return ([], [], [], [], [])
             }
             let expirations: [Date] = (result.expirationDates ?? []).map { Date(timeIntervalSince1970: TimeInterval($0)) }.sorted()
-            if let strikes = result.strikes, !strikes.isEmpty {
-                let sorted = strikes.sorted()
-                return (expirations, sorted, sorted)
-            } else {
-                let opts = result.options.first
-                let callStrikes = (opts?.calls ?? []).compactMap { $0.strike?.raw ?? $0.strike?.double }.sorted()
-                let putStrikes  = (opts?.puts  ?? []).compactMap { $0.strike?.raw ?? $0.strike?.double }.sorted()
-                return (expirations, callStrikes, putStrikes)
+            let opts = result.options.first
+            let calls = opts?.calls ?? []
+            let puts  = opts?.puts  ?? []
+
+            // Strikes from arrays if provided; else fall back to result.strikes
+            var callStrikes: [Double] = calls.compactMap { $0.strike?.raw ?? $0.strike?.double }
+            var putStrikes:  [Double] = puts.compactMap  { $0.strike?.raw ?? $0.strike?.double }
+            if callStrikes.isEmpty || putStrikes.isEmpty {
+                if let strikes = result.strikes, !strikes.isEmpty {
+                    let sorted = strikes.sorted()
+                    if callStrikes.isEmpty { callStrikes = sorted }
+                    if putStrikes.isEmpty  { putStrikes  = sorted }
+                }
             }
+
+            let callContracts: [OptionContract] = calls.compactMap { c in
+                guard let k = c.strike?.raw ?? c.strike?.double else { return nil }
+                return OptionContract(kind: .call, strike: k, bid: c.bid, ask: c.ask, last: c.lastPrice)
+            }.sorted { $0.strike < $1.strike }
+
+            let putContracts: [OptionContract] = puts.compactMap { p in
+                guard let k = p.strike?.raw ?? p.strike?.double else { return nil }
+                return OptionContract(kind: .put, strike: k, bid: p.bid, ask: p.ask, last: p.lastPrice)
+            }.sorted { $0.strike < $1.strike }
+
+            #if DEBUG
+            let pricedCalls = callContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
+            let pricedPuts  = putContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
+            print("[DEBUG][YahooOptions] expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced calls: \(pricedCalls.count), priced puts: \(pricedPuts.count)")
+            if let firstExp = expirations.first { print("[DEBUG][YahooOptions] first expiration: \(firstExp)") }
+            if let c0 = callContracts.first { print("[DEBUG][YahooOptions] sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))") }
+            #endif
+            return (expirations, callStrikes.sorted(), putStrikes.sorted(), callContracts, putContracts)
         }
 
         var components = URLComponents(string: "https://query2.finance.yahoo.com/v7/finance/options/\(trimmed.uppercased())")
@@ -630,12 +721,44 @@ actor QuoteService {
                     }
                     let parsed2 = try parseChain(data2)
                     let finalExpirations = parsed2.expirations.isEmpty ? parsed.expirations : parsed2.expirations
-                    return OptionChainData(expirations: finalExpirations, callStrikes: parsed2.callStrikes, putStrikes: parsed2.putStrikes)
+
+                    let callsContracts: [OptionContract]
+                    let putsContracts:  [OptionContract]
+                    if !parsed2.callContracts.isEmpty || !parsed2.putContracts.isEmpty {
+                        callsContracts = parsed2.callContracts
+                        putsContracts  = parsed2.putContracts
+                    } else {
+                        callsContracts = parsed2.callStrikes.map { OptionContract(kind: .call, strike: $0, bid: nil, ask: nil, last: nil) }
+                        putsContracts  = parsed2.putStrikes.map  { OptionContract(kind: .put,  strike: $0, bid: nil, ask: nil, last: nil) }
+                    }
+
+                    return OptionChainData(
+                        expirations: finalExpirations,
+                        callStrikes: parsed2.callStrikes,
+                        putStrikes: parsed2.putStrikes,
+                        callContracts: callsContracts,
+                        putContracts: putsContracts
+                    )
                 }
             }
 
-            // Return gracefully even if empty
-            return OptionChainData(expirations: parsed.expirations, callStrikes: parsed.callStrikes, putStrikes: parsed.putStrikes)
+            let callsContracts: [OptionContract]
+            let putsContracts:  [OptionContract]
+            if !parsed.callContracts.isEmpty || !parsed.putContracts.isEmpty {
+                callsContracts = parsed.callContracts
+                putsContracts  = parsed.putContracts
+            } else {
+                callsContracts = parsed.callStrikes.map { OptionContract(kind: .call, strike: $0, bid: nil, ask: nil, last: nil) }
+                putsContracts  = parsed.putStrikes.map  { OptionContract(kind: .put,  strike: $0, bid: nil, ask: nil, last: nil) }
+            }
+
+            return OptionChainData(
+                expirations: parsed.expirations,
+                callStrikes: parsed.callStrikes,
+                putStrikes: parsed.putStrikes,
+                callContracts: callsContracts,
+                putContracts: putsContracts
+            )
         } catch is DecodingError {
             throw QuoteError.parse
         } catch {
@@ -706,6 +829,9 @@ private nonisolated struct YFDoubleOrObject: Decodable {
 
 private nonisolated struct YFContract: Decodable {
     let strike: YFDoubleOrObject?
+    let bid: Double?
+    let ask: Double?
+    let lastPrice: Double?
 }
 private nonisolated struct YFChartRoot: Decodable {
     let chart: YFChart
@@ -783,7 +909,11 @@ private nonisolated struct TradierOptions: Decodable {
 }
 
 private nonisolated struct TradierOption: Decodable {
+    let symbol: String?
     let strike: Double?
     let option_type: String?
+    let bid: Double?
+    let ask: Double?
+    let last: Double?
 }
 

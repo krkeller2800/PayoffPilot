@@ -1,6 +1,6 @@
 //
 //  SettingsView.swift
-//  PayoffPilot
+//  StrikeGold
 //
 //  Created by Assistant on 12/31/25.
 //
@@ -17,10 +17,14 @@ import CryptoKit
 struct SettingsView: View {
     @StateObject private var viewModel = SettingsViewModel()
     @State private var showToken: Bool = false
+    @State private var showAdvanced: Bool = false
     @Environment(\.dismiss) private var dismiss
 
     @State private var authInProgress: Bool = false
     @State private var authErrorMessage: String? = nil
+    @State private var diagRunning: Bool = false
+    @State private var diagMessage: String? = nil
+    @State private var diagSymbol: String = "AAPL"
 
     @State private var webAuthSession: ASWebAuthenticationSession? = nil
     @State private var pkceVerifier: String = ""
@@ -32,6 +36,9 @@ struct SettingsView: View {
 
     @AppStorage("tradierEnvironment")
     private var tradierEnvironmentRaw: String = "production"
+    
+    @AppStorage("tradierTokenPersisted")
+    private var tradierTokenPersisted: Bool = false
 
     // Bindings that bridge @AppStorage <-> ViewModel enums
     private var selectedProviderBinding: Binding<SettingsViewModel.BYOProvider> {
@@ -67,20 +74,13 @@ struct SettingsView: View {
 //                }
 
                 if viewModel.selectedProvider == .tradier {
-                    Section("Tradier (BYO key)") {
-                        HStack(alignment: .firstTextBaseline) {
-                            if showToken {
-                                TextField("Paste OAuth token", text: $viewModel.tradierToken, axis: .vertical)
-                                    .textInputAutocapitalization(.never)
-                                    .autocorrectionDisabled()
-                                    .lineLimit(1...4)
-                            } else {
-                                SecureField("Paste OAuth token", text: $viewModel.tradierToken)
-                                    .textInputAutocapitalization(.never)
-                                    .autocorrectionDisabled()
-                            }
-                            Button(showToken ? "Hide" : "Show") { showToken.toggle() }
-                                .buttonStyle(GradientAdButtonStyle(startColor: .gray, endColor: .blue))
+                    Section("Tradier") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Recommended: Sign in with Tradier")
+                                .font(.headline)
+                            Text("No API key required. Tap below and sign in to securely connect your Tradier account.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
 
                         Picker("Environment", selection: environmentBinding) {
@@ -88,7 +88,7 @@ struct SettingsView: View {
                             Text("Sandbox").tag(TradierProvider.Environment.sandbox)
                         }
                         .pickerStyle(.segmented)
-                        
+
                         HStack {
                             Button(authInProgress ? "Signing in…" : "Sign in with Tradier") {
                                 startTradierSignIn()
@@ -97,13 +97,94 @@ struct SettingsView: View {
                             .buttonStyle(GradientAdButtonStyle(startColor: .blue, endColor: .indigo))
                             Spacer()
                         }
-                        Text("Use OAuth sign-in to retrieve an access token automatically.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+
                         if let authErrorMessage {
                             Text(authErrorMessage)
                                 .font(.footnote)
                                 .foregroundStyle(.red)
+                        }
+                        Text("Your access token is stored securely in Keychain. You can remove it anytime using 'Clear Token' in Actions.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+
+                        DisclosureGroup(isExpanded: $showAdvanced) {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Advanced: Paste API token manually (typically not required).")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                HStack(alignment: .firstTextBaseline) {
+                                    if showToken {
+                                        TextField("Paste API token (advanced)", text: $viewModel.tradierToken, axis: .vertical)
+                                            .textInputAutocapitalization(.never)
+                                            .autocorrectionDisabled()
+                                            .lineLimit(1...4)
+                                    } else {
+                                        SecureField("Paste API token (advanced)", text: $viewModel.tradierToken)
+                                            .textInputAutocapitalization(.never)
+                                            .autocorrectionDisabled()
+                                    }
+                                    Button(showToken ? "Hide" : "Show") { showToken.toggle() }
+                                        .buttonStyle(GradientAdButtonStyle(startColor: .gray, endColor: .blue))
+                                }
+                                HStack {
+                                    Button("Paste from Clipboard") {
+                                        if let s = UIPasteboard.general.string { viewModel.tradierToken = s }
+                                        tradierTokenPersisted = false
+                                    }
+                                    .buttonStyle(GradientAdButtonStyle(startColor: .gray, endColor: .blue))
+                                    Spacer()
+                                    Button(viewModel.isValidating ? "Validating…" : "Validate (temporary)") {
+                                        tradierTokenPersisted = false
+                                        Task { await viewModel.validateSelected() }
+                                    }
+                                    .disabled(viewModel.isValidating)
+                                    .buttonStyle(GradientAdButtonStyle(startColor: .green, endColor: .mint))
+                                }
+                                HStack {
+                                    Button(viewModel.isValidating ? "Connecting…" : "Connect (save + enable)") {
+                                        Task {
+                                            await viewModel.connectSelected()
+                                            if viewModel.validationSucceeded { tradierTokenPersisted = true }
+                                        }
+                                    }
+                                    .disabled(viewModel.isValidating)
+                                    .buttonStyle(GradientAdButtonStyle(startColor: .teal, endColor: .green))
+                                    Spacer()
+                                }
+                                Text("Temporary: Not saved to Keychain. Use Sign in with Tradier for a persisted, secure token.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text("Use until app restarts.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        } label: {
+                            Text("Advanced options")
+                        }
+                    }
+                    Section("Options Diagnostics") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Test Tradier options endpoints using your current environment and token.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            HStack(spacing: 12) {
+                                TextField("Symbol", text: $diagSymbol)
+                                    .textInputAutocapitalization(.characters)
+                                    .autocorrectionDisabled(true)
+                                Button(diagRunning ? "Running…" : "Run Diagnostics") {
+                                    runOptionsDiagnostics()
+                                }
+                                .disabled(diagRunning)
+                                .buttonStyle(GradientAdButtonStyle(startColor: .purple, endColor: .blue))
+                            }
+
+                            if let diagMessage {
+                                Text(diagMessage)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                            }
                         }
                     }
                 }
@@ -166,27 +247,48 @@ struct SettingsView: View {
                 }
 
                 Section("Actions") {
-                    Grid(horizontalSpacing: 8, verticalSpacing: 8) {
-                        GridRow {
-                            Button("Save") { viewModel.saveSelected() }
-                                .buttonStyle(GradientAdButtonStyle())
-                            Spacer()
-                            Button(viewModel.isValidating ? "Validating…" : "Validate") {
-                                Task { await viewModel.validateSelected() }
-                            }
-                            .disabled(viewModel.isValidating)
-                            .buttonStyle(GradientAdButtonStyle(startColor: .green, endColor: .mint))
-                        }
-
-                        GridRow {
-                            Button("Enable") { viewModel.enableSelected() }
+                    if viewModel.selectedProvider == .tradier {
+                        Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+                            GridRow {
+                                Button(viewModel.isValidating ? "Connecting…" : "Connect") {
+                                    Task { await viewModel.connectSelected() }
+                                }
+                                .disabled(viewModel.isValidating)
                                 .buttonStyle(GradientAdButtonStyle(startColor: .teal, endColor: .green))
-                            Spacer()
-                            Button("Disable") { viewModel.disableProvider() }
-                                .buttonStyle(GradientAdButtonStyle(startColor: .orange, endColor: .red))
-                            Spacer()
-                            Button("Clear Token", role: .destructive) { viewModel.clearSelected() }
-                                .buttonStyle(GradientAdButtonStyle(startColor: .red, endColor: .pink))
+                                Spacer()
+                                Button("Disable") { viewModel.disableProvider() }
+                                    .buttonStyle(GradientAdButtonStyle(startColor: .orange, endColor: .red))
+                                Spacer()
+                                Button("Clear Token", role: .destructive) { viewModel.clearSelected() }
+                                    .buttonStyle(GradientAdButtonStyle(startColor: .red, endColor: .pink))
+                            }
+                        }
+                    } else {
+                        Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+                            GridRow {
+                                Button("Save") { viewModel.saveSelected() }
+                                    .buttonStyle(GradientAdButtonStyle())
+                                Spacer()
+                                Button(viewModel.isValidating ? "Validating…" : "Validate") {
+                                    Task { await viewModel.validateSelected() }
+                                }
+                                .disabled(viewModel.isValidating)
+                                .buttonStyle(GradientAdButtonStyle(startColor: .green, endColor: .mint))
+                            }
+
+                            GridRow {
+                                Button(viewModel.isValidating ? "Connecting…" : "Connect") {
+                                    Task { await viewModel.connectSelected() }
+                                }
+                                .disabled(viewModel.isValidating)
+                                .buttonStyle(GradientAdButtonStyle(startColor: .teal, endColor: .green))
+                                Spacer()
+                                Button("Disable") { viewModel.disableProvider() }
+                                    .buttonStyle(GradientAdButtonStyle(startColor: .orange, endColor: .red))
+                                Spacer()
+                                Button("Clear Token", role: .destructive) { viewModel.clearSelected() }
+                                    .buttonStyle(GradientAdButtonStyle(startColor: .red, endColor: .pink))
+                            }
                         }
                     }
                 }
@@ -212,6 +314,18 @@ struct SettingsView: View {
                         .foregroundStyle(viewModel.quoteService == nil ? .secondary : Color.green)
                         Spacer()
                     }
+                    if viewModel.selectedProvider == .tradier && !viewModel.tradierToken.isEmpty {
+                        HStack {
+                            if tradierTokenPersisted {
+                                Label("Signed in (OAuth)", systemImage: "key.fill")
+                                    .foregroundStyle(Color.green)
+                            } else {
+                                Label("Temporary session token", systemImage: "clock")
+                                    .foregroundStyle(Color.orange)
+                            }
+                            Spacer()
+                        }
+                    }
                 }
             }
             .navigationTitle("Settings")
@@ -236,7 +350,7 @@ struct SettingsView: View {
 
         // Client/app configuration
         let clientId = "YOUR_TRADIER_CLIENT_ID" // TODO: set your client ID
-        let redirectScheme = "payoffpilot"       // e.g., your app URL scheme registered in Info.plist
+        let redirectScheme = "strikegold"       // e.g., your app URL scheme registered in Info.plist
         let redirectHost = "auth-callback"       // host/path component for callback
         let redirectURI = "\(redirectScheme)://\(redirectHost)"
 
@@ -309,7 +423,7 @@ struct SettingsView: View {
         if let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
            let code = comps.queryItems?.first(where: { $0.name == "code" })?.value {
             // Exchange code for token
-            exchangeTradierCodeForToken(code: code, redirectURI: "payoffpilot://auth-callback", verifier: pkceVerifier, isSandbox: (viewModel.environment == .sandbox))
+            exchangeTradierCodeForToken(code: code, redirectURI: "strikegold://auth-callback", verifier: pkceVerifier, isSandbox: (viewModel.environment == .sandbox))
         } else if let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
                   let errorDesc = comps.queryItems?.first(where: { $0.name == "error" })?.value {
             authErrorMessage = "Sign-in failed: \(errorDesc)"
@@ -363,6 +477,12 @@ struct SettingsView: View {
                 try? KeychainHelper.save(value: accessToken, for: KeychainHelper.Keys.tradierToken)
                 await MainActor.run {
                     self.viewModel.tradierToken = accessToken
+                    // Auto-validate and enable after OAuth for a smoother flow
+                    Task { [weak viewModel] in
+                        await viewModel?.validateSelected()
+                        await MainActor.run { viewModel?.enableSelected() }
+                    }
+                    self.tradierTokenPersisted = true
                     self.authErrorMessage = nil
                     self.authInProgress = false
                 }
@@ -402,6 +522,92 @@ struct SettingsView: View {
         // If CryptoKit is unavailable, this placeholder will break. Replace with CryptoKit or your own SHA256.
         fatalError("CryptoKit is required for PKCE sha256. Import CryptoKit.")
         #endif
+    }
+
+    // MARK: - Diagnostics
+    private func runOptionsDiagnostics() {
+        let symbol = diagSymbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard !symbol.isEmpty else {
+            diagMessage = "Enter a symbol to test."
+            return
+        }
+        let token = viewModel.tradierToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            diagMessage = "No token available. Sign in with Tradier or paste a token in Advanced."
+            return
+        }
+        let base = (viewModel.environment == .sandbox) ? "https://sandbox.tradier.com" : "https://api.tradier.com"
+
+        diagRunning = true
+        diagMessage = nil
+
+        Task {
+            var status1: Int = -1
+            var status2: Int = -1
+            do {
+                // 1) Expirations
+                var expComps = URLComponents(string: base)
+                expComps?.path = "/v1/markets/options/expirations"
+                expComps?.queryItems = [ URLQueryItem(name: "symbol", value: symbol) ]
+                guard let expURL = expComps?.url else { throw URLError(.badURL) }
+                var expReq = URLRequest(url: expURL)
+                expReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                expReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                let (expData, expResp) = try await URLSession.shared.data(for: expReq)
+                status1 = (expResp as? HTTPURLResponse)?.statusCode ?? -1
+
+                var firstDate: String? = nil
+                if let obj = try? JSONSerialization.jsonObject(with: expData) as? [String: Any],
+                   let exps = obj["expirations"] as? [String: Any],
+                   let dates = exps["date"] as? [String],
+                   let d0 = dates.first {
+                    firstDate = d0
+                }
+
+                // 2) Chain (if we have at least one expiration)
+                var chainSummary = ""
+                if let d = firstDate {
+                    var chComps = URLComponents(string: base)
+                    chComps?.path = "/v1/markets/options/chains"
+                    chComps?.queryItems = [
+                        URLQueryItem(name: "symbol", value: symbol),
+                        URLQueryItem(name: "expiration", value: d),
+                        URLQueryItem(name: "greeks", value: "false")
+                    ]
+                    if let chURL = chComps?.url {
+                        var chReq = URLRequest(url: chURL)
+                        chReq.setValue("application/json", forHTTPHeaderField: "Accept")
+                        chReq.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                        let (chData, chResp) = try await URLSession.shared.data(for: chReq)
+                        status2 = (chResp as? HTTPURLResponse)?.statusCode ?? -1
+
+                        var calls = 0
+                        var puts = 0
+                        if let obj = try? JSONSerialization.jsonObject(with: chData) as? [String: Any],
+                           let opts = obj["options"] as? [String: Any],
+                           let arr = opts["option"] as? [[String: Any]] {
+                            for item in arr {
+                                if let t = (item["option_type"] as? String)?.lowercased() {
+                                    if t == "call" { calls += 1 } else if t == "put" { puts += 1 }
+                                }
+                            }
+                        }
+                        chainSummary = "Chain(\(d)): \(calls) calls / \(puts) puts"
+                    }
+                }
+
+                let msg = "Expirations status: \(status1). First date: \(firstDate ?? "—"). \nChain status: \(status2). \(chainSummary)"
+                await MainActor.run {
+                    diagMessage = msg
+                    diagRunning = false
+                }
+            } catch {
+                await MainActor.run {
+                    diagMessage = "Diagnostics failed: \(error.localizedDescription). (exp: \(status1), chain: \(status2))"
+                    diagRunning = false
+                }
+            }
+        }
     }
 
     // Helper to provide a presentation anchor

@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  PayoffPilot
+//  StrikeGold
 //
 //  Created by Karl Keller on 12/30/25.
 //
@@ -13,6 +13,53 @@ import Foundation
 
 @MainActor
 struct ContentView: View {
+    // MARK: - Saving Models
+    struct SavedStrategy: Identifiable, Codable, Hashable {
+        enum Kind: String, Codable {
+            case singleCall, singlePut, bullCallSpread
+        }
+        struct SavedLeg: Codable, Hashable {
+            var type: String // "call" or "put"
+            var side: String // "long" or "short"
+            var strike: Double
+            var premium: Double
+            var contracts: Int
+            var multiplier: Double
+        }
+        var id: UUID = UUID()
+        var createdAt: Date = Date()
+        var kind: Kind
+        var symbol: String
+        var expiration: Date?
+        var legs: [SavedLeg]
+        var marketPriceAtSave: Double?
+        var note: String?
+    }
+
+    final class StrategyStore {
+        static let shared = StrategyStore()
+        private let key = "saved_strategies_v1"
+        func load() -> [SavedStrategy] {
+            guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
+            return (try? JSONDecoder().decode([SavedStrategy].self, from: data)) ?? []
+        }
+        func save(_ strategies: [SavedStrategy]) {
+            if let data = try? JSONEncoder().encode(strategies) {
+                UserDefaults.standard.set(data, forKey: key)
+            }
+        }
+        func append(_ strategy: SavedStrategy) {
+            var all = load()
+            all.append(strategy)
+            save(all)
+        }
+        func remove(id: UUID) {
+            var all = load()
+            all.removeAll { $0.id == id }
+            save(all)
+        }
+    }
+
     private enum Strategy: String, CaseIterable, Identifiable {
         case singleCall = "Call"
         case singlePut = "Put"
@@ -25,8 +72,8 @@ struct ContentView: View {
     // Inputs (MVP: manual)
     @State private var strikeText: String = "100"
     @State private var premiumText: String = "2.50"
-    @State private var shortCallStrikeText: String = "110"
-    @State private var shortCallPremiumText: String = "1.00"
+    @State private var shortCallStrikeText: String = ""
+    @State private var shortCallPremiumText: String = ""
     @State private var underlyingNowText: String = "100"
     @State private var contracts: Int = 1
 
@@ -42,14 +89,34 @@ struct ContentView: View {
     @State private var putStrikes: [Double] = []
     @State private var selectedCallStrike: Double?
     @State private var selectedPutStrike: Double?
+    
+    @State private var selectedCallContract: OptionContract? = nil
+    @State private var selectedPutContract: OptionContract? = nil
+    
+    @State private var cachedCallContracts: [OptionContract] = []
+    @State private var cachedPutContracts: [OptionContract] = []
+    
+    @State private var callMenuStrikeWidth: Int = 0
+    @State private var putMenuStrikeWidth: Int = 0
+    
+    @State private var useMarketPremium: Bool = true
+
     @State private var lastRefresh: Date?
     @State private var showSettings: Bool = false
     @State private var symbolLookupTask: Task<Void, Never>? = nil
     @State private var showWhatIfSheet: Bool = false
+    @State private var showTipsCall: Bool = false
+    @State private var showTipsPut: Bool = false
+    @State private var showTipsSpread: Bool = false
+    @State private var showGlossary: Bool = false
+
+    @State private var showSavedConfirmation: Bool = false
     
     @AppStorage("lastEnabledProvider") private var lastEnabledProviderRaw: String = ""
     @AppStorage("tradierEnvironment") private var tradierEnvironmentRaw: String = "production"
     @State private var appQuoteService: QuoteService = QuoteService()
+    @State private var isUsingCustomProvider: Bool = false
+    @State private var suppressExpirationRefetch: Bool = false
 
     private let multiplier: Double = 100
 
@@ -62,8 +129,22 @@ struct ContentView: View {
                 }
                 .padding()
             }
-            .navigationTitle("PayoffPilot")
+            .navigationTitle("StrikeGold")
             .toolbar {
+                // Leading: Save + Saved
+                ToolbarItemGroup(placement: .topBarLeading) {
+                    Button {
+                        saveCurrentStrategy()
+                    } label: {
+                        Image(systemName: "tray.and.arrow.down")
+                    }
+
+                    NavigationLink(destination: SavedStrategiesView()) {
+                        Image(systemName: "tray.full")
+                    }
+                }
+
+                // Trailing: Settings
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         showSettings = true
@@ -79,29 +160,7 @@ struct ContentView: View {
             Task { await lookupSymbol() }
             
             // Configure app-level provider if a last-enabled provider is persisted
-            if let provider = SettingsViewModel.BYOProvider(rawValue: lastEnabledProviderRaw) {
-                switch provider {
-                case .tradier:
-                    if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradierToken) {
-                        let env: TradierProvider.Environment = (tradierEnvironmentRaw == "sandbox") ? .sandbox : .production
-                        appQuoteService = QuoteService(provider: TradierProvider(token: token, environment: env))
-                    }
-                case .finnhub:
-                    if let token = KeychainHelper.load(key: KeychainHelper.Keys.finnhubToken) {
-                        appQuoteService = QuoteService(provider: FinnhubProvider(token: token))
-                    }
-                case .polygon:
-                    if let token = KeychainHelper.load(key: KeychainHelper.Keys.polygonToken) {
-                        appQuoteService = QuoteService(provider: PolygonProvider(token: token))
-                    }
-                case .tradestation:
-                    if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradestationToken) {
-                        appQuoteService = QuoteService(provider: TradeStationProvider(token: token))
-                    }
-                }
-            } else {
-                appQuoteService = QuoteService() // default (Yahoo/Stooq)
-            }
+            rebuildProviderFromStorage()
         }
         .onChange(of: symbolText) { _, _ in
             // Debounce rapid typing; update underlying and chain shortly after edits
@@ -113,44 +172,20 @@ struct ContentView: View {
                 await lookupSymbol()
             }
         }
-        .onChange(of: lastEnabledProviderRaw) { _, newValue in
-            if let provider = SettingsViewModel.BYOProvider(rawValue: newValue) {
-                switch provider {
-                case .tradier:
-                    if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradierToken) {
-                        let env: TradierProvider.Environment = (tradierEnvironmentRaw == "sandbox") ? .sandbox : .production
-                        appQuoteService = QuoteService(provider: TradierProvider(token: token, environment: env))
-                    }
-                case .finnhub:
-                    if let token = KeychainHelper.load(key: KeychainHelper.Keys.finnhubToken) {
-                        appQuoteService = QuoteService(provider: FinnhubProvider(token: token))
-                    }
-                case .polygon:
-                    if let token = KeychainHelper.load(key: KeychainHelper.Keys.polygonToken) {
-                        appQuoteService = QuoteService(provider: PolygonProvider(token: token))
-                    }
-                case .tradestation:
-                    if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradestationToken) {
-                        appQuoteService = QuoteService(provider: TradeStationProvider(token: token))
-                    }
-                }
-            } else {
-                appQuoteService = QuoteService()
-            }
+        .onChange(of: lastEnabledProviderRaw) { _, _ in
+            rebuildProviderFromStorage()
         }
         .onChange(of: tradierEnvironmentRaw) { _, _ in
-            // If Tradier is the active provider, rebuild the QuoteService with the new environment
-            guard let provider = SettingsViewModel.BYOProvider(rawValue: lastEnabledProviderRaw), provider == .tradier else { return }
-            if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradierToken) {
-                let env: TradierProvider.Environment = (tradierEnvironmentRaw == "sandbox") ? .sandbox : .production
-                appQuoteService = QuoteService(provider: TradierProvider(token: token, environment: env))
-            }
+            rebuildProviderFromStorage()
         }
         .onChange(of: underlyingNowText) { _, _ in
             // Keep slider roughly aligned if user edits underlying
             expirySpot = underlyingNow
         }
-        .sheet(isPresented: $showSettings) {
+        .sheet(isPresented: $showSettings, onDismiss: {
+            rebuildProviderFromStorage()
+            Task { await lookupSymbol() }
+        }) {
             SettingsView()
         }
     }
@@ -225,6 +260,7 @@ struct ContentView: View {
     }
 
     private var dataSourceLabel: String {
+        if !isUsingCustomProvider { return "Delayed data via Yahoo" }
         if let provider = SettingsViewModel.BYOProvider(rawValue: lastEnabledProviderRaw) {
             switch provider {
             case .tradier:
@@ -237,10 +273,8 @@ struct ContentView: View {
             case .tradestation:
                 return "Data via TradeStation"
             }
-        } else {
-            // Default provider (Yahoo/Stooq) is delayed
-            return "Delayed data via Yahoo"
         }
+        return "Delayed data via Yahoo"
     }
 
     // MARK: - UI
@@ -317,58 +351,396 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Option Chain (delayed)")
                         .font(.subheadline)
-                    HStack(spacing: 12) {
-                        // Expiration picker
-                        Picker("Expiration", selection: $selectedExpiration) {
-                            ForEach(expirations, id: \.self) { d in
-                                Text(d.formatted(date: .abbreviated, time: .omitted)).tag(Optional(d))
+                    
+                    if strategy == .bullCallSpread {
+                        ViewThatFits(in: .horizontal) {
+                            // Horizontal layout: Expiration + Long + Short
+                            HStack(spacing: 8) {
+                                // Expiration picker
+                                Picker("Expiration", selection: $selectedExpiration) {
+                                    Text("Select Expiration").tag(Optional<Date>.none)
+                                    ForEach(expirations, id: \.self) { d in
+                                        Text(d.formatted(date: .abbreviated, time: .omitted)).tag(Optional(d))
+                                    }
+                                }
+                                .onChange(of: selectedExpiration) { _, _ in
+                                    if suppressExpirationRefetch {
+                                        suppressExpirationRefetch = false
+                                    } else {
+                                        Task { await refetchForExpiration() }
+                                    }
+                                }
+                                .fixedSize(horizontal: true, vertical: false)
+
+                                // Long (lower) call picker
+                                VStack(alignment: .leading, spacing: 4) {
+                                    GeometryReader { geo in
+                                        let col = geo.size.width / 2
+                                        HStack(spacing: 0) {
+                                            Text("Long Call")
+                                                .frame(width: col, alignment: .center)
+                                                .offset(x: 12)
+                                            Text("Mid")
+                                                .frame(width: col, alignment: .center)
+                                                .offset(x: -12)
+                                        }
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(height: 16)
+
+                                    Picker(selection: $selectedCallContract) {
+                                        Text("Select Long").tag(Optional<OptionContract>.none)
+                                        ForEach(filteredLongCallContracts(), id: \.self) { c in
+                                            Text(contractMenuRowText(c))
+                                                .font(.body)
+                                                .monospacedDigit()
+                                                .tag(Optional(c))
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(selectedCallContract.map { OptionsFormat.number($0.strike) } ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                            Text((selectedCallContract?.mid ?? selectedCallContract?.last).map(OptionsFormat.number) ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                        }
+                                        .font(.body)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .frame(maxWidth: 260, alignment: .center)
+                                .onChange(of: selectedCallContract) { _, new in
+                                    #if DEBUG
+                                    if let c = new {
+                                        print("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                    }
+                                    #endif
+                                    if let c = new {
+                                        selectedCallStrike = c.strike
+                                        strikeText = OptionsFormat.number(c.strike)
+                                        if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
+                                        // Enforce lower < upper by nudging upper up if needed
+                                        if let upper = selectedPutStrike, upper <= c.strike {
+                                            if let newUpper = nextHigherStrike(after: c.strike, in: callStrikes) {
+                                                selectedPutStrike = newUpper
+                                                selectedPutContract = cachedCallContracts.first(where: { $0.strike == newUpper })
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Short (upper) call picker
+                                VStack(alignment: .leading, spacing: 4) {
+                                    GeometryReader { geo in
+                                        let col = geo.size.width / 2
+                                        HStack(spacing: 0) {
+                                            Text("Short Call")
+                                                .frame(width: col, alignment: .center)
+                                                .offset(x: 12)
+                                            Text("Mid")
+                                                .frame(width: col, alignment: .center)
+                                                .offset(x: -12)
+                                        }
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(height: 16)
+
+                                    Picker(selection: $selectedPutContract) {
+                                        Text("Select Short").tag(Optional<OptionContract>.none)
+                                        ForEach(filteredShortCallContracts(), id: \.self) { c in
+                                            Text(contractMenuRowText(c))
+                                                .font(.body)
+                                                .monospacedDigit()
+                                                .tag(Optional(c))
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(selectedPutContract.map { OptionsFormat.number($0.strike) } ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                            Text((selectedPutContract?.mid ?? selectedPutContract?.last).map(OptionsFormat.number) ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                        }
+                                        .font(.body)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .frame(maxWidth: 260, alignment: .center)
+                                .onChange(of: selectedPutContract) { _, new in
+                                    #if DEBUG
+                                    if let c = new {
+                                        print("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                    }
+                                    #endif
+                                    if let c = new {
+                                        selectedPutStrike = c.strike
+                                        // Enforce lower < upper by nudging lower down if needed
+                                        if let lower = selectedCallStrike, lower >= c.strike {
+                                            if let newLower = callStrikes.filter({ $0 < c.strike }).max() {
+                                                selectedCallStrike = newLower
+                                                strikeText = OptionsFormat.number(newLower)
+                                                selectedCallContract = cachedCallContracts.first(where: { $0.strike == newLower })
+                                                if useMarketPremium, let mid2 = selectedCallContract?.mid { premiumText = OptionsFormat.number(mid2) }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Vertical fallback: stack Expiration, Long, Short
+                            VStack(alignment: .leading, spacing: 8) {
+                                // Expiration picker
+                                Picker("Expiration", selection: $selectedExpiration) {
+                                    Text("Select Expiration").tag(Optional<Date>.none)
+                                    ForEach(expirations, id: \.self) { d in
+                                        Text(d.formatted(date: .abbreviated, time: .omitted)).tag(Optional(d))
+                                    }
+                                }
+                                .onChange(of: selectedExpiration) { _, _ in
+                                    if suppressExpirationRefetch {
+                                        suppressExpirationRefetch = false
+                                    } else {
+                                        Task { await refetchForExpiration() }
+                                    }
+                                }
+                                .fixedSize(horizontal: true, vertical: false)
+
+                                // Long (lower) call picker
+                                VStack(alignment: .leading, spacing: 4) {
+                                    GeometryReader { geo in
+                                        let col = geo.size.width / 2
+                                        HStack(spacing: 0) {
+                                            Text("Long Call")
+                                                .frame(width: col, alignment: .center)
+                                                .offset(x: 12)
+                                            Text("Mid")
+                                                .frame(width: col, alignment: .center)
+                                                .offset(x: -12)
+                                        }
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(height: 16)
+
+                                    Picker(selection: $selectedCallContract) {
+                                        Text("Select Long").tag(Optional<OptionContract>.none)
+                                        ForEach(filteredLongCallContracts(), id: \.self) { c in
+                                            Text(contractMenuRowText(c))
+                                                .font(.body)
+                                                .monospacedDigit()
+                                                .tag(Optional(c))
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(selectedCallContract.map { OptionsFormat.number($0.strike) } ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                            Text((selectedCallContract?.mid ?? selectedCallContract?.last).map(OptionsFormat.number) ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                        }
+                                        .font(.body)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .frame(maxWidth: 260, alignment: .center)
+                                .onChange(of: selectedCallContract) { _, new in
+                                    #if DEBUG
+                                    if let c = new {
+                                        print("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                    }
+                                    #endif
+                                    if let c = new {
+                                        selectedCallStrike = c.strike
+                                        strikeText = OptionsFormat.number(c.strike)
+                                        if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
+                                        // Enforce lower < upper by nudging upper up if needed
+                                        if let upper = selectedPutStrike, upper <= c.strike {
+                                            if let newUpper = nextHigherStrike(after: c.strike, in: callStrikes) {
+                                                selectedPutStrike = newUpper
+                                                selectedPutContract = cachedCallContracts.first(where: { $0.strike == newUpper })
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Short (upper) call picker
+                                VStack(alignment: .leading, spacing: 4) {
+                                    GeometryReader { geo in
+                                        let col = geo.size.width / 2
+                                        HStack(spacing: 0) {
+                                            Text("Short Call")
+                                                .frame(width: col, alignment: .center)
+                                                .offset(x: 12)
+                                            Text("Mid")
+                                                .frame(width: col, alignment: .center)
+                                                .offset(x: -12)
+                                        }
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .frame(height: 16)
+
+                                    Picker(selection: $selectedPutContract) {
+                                        Text("Select Short").tag(Optional<OptionContract>.none)
+                                        ForEach(filteredShortCallContracts(), id: \.self) { c in
+                                            Text(contractMenuRowText(c))
+                                                .font(.body)
+                                                .monospacedDigit()
+                                                .tag(Optional(c))
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(selectedPutContract.map { OptionsFormat.number($0.strike) } ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                            Text((selectedPutContract?.mid ?? selectedPutContract?.last).map(OptionsFormat.number) ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                        }
+                                        .font(.body)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .frame(maxWidth: 260, alignment: .center)
+                                .onChange(of: selectedPutContract) { _, new in
+                                    #if DEBUG
+                                    if let c = new {
+                                        print("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                    }
+                                    #endif
+                                    if let c = new {
+                                        selectedPutStrike = c.strike
+                                        // Enforce lower < upper by nudging lower down if needed
+                                        if let lower = selectedCallStrike, lower >= c.strike {
+                                            if let newLower = callStrikes.filter({ $0 < c.strike }).max() {
+                                                selectedCallStrike = newLower
+                                                strikeText = OptionsFormat.number(newLower)
+                                                selectedCallContract = cachedCallContracts.first(where: { $0.strike == newLower })
+                                                if useMarketPremium, let mid2 = selectedCallContract?.mid { premiumText = OptionsFormat.number(mid2) }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
-                        .onChange(of: selectedExpiration) { _, _ in
-                            Task { await refetchForExpiration() }
-                        }
-                        .frame(maxWidth: .infinity)
+                    } else {
+                        HStack(spacing: 8) {
+                            // Expiration picker
+                            Picker("Expiration", selection: $selectedExpiration) {
+                                Text("Select Expiration").tag(Optional<Date>.none)
+                                ForEach(expirations, id: \.self) { d in
+                                    Text(d.formatted(date: .abbreviated, time: .omitted)).tag(Optional(d))
+                                }
+                            }
+                            .onChange(of: selectedExpiration) { _, _ in
+                                if suppressExpirationRefetch {
+                                    suppressExpirationRefetch = false
+                                } else {
+                                    Task { await refetchForExpiration() }
+                                }
+                            }
+                            .fixedSize(horizontal: true, vertical: false)
 
-                        // Strike picker(s)
-                        if strategy == .singleCall {
-                            Picker("Call Strike", selection: $selectedCallStrike) {
-                                ForEach(callStrikes, id: \.self) { s in
-                                    Text(OptionsFormat.number(s)).tag(Optional(s))
-                                }
-                            }
-                            .onChange(of: selectedCallStrike) { _, new in
-                                if let s = new { strikeText = OptionsFormat.number(s) }
-                            }
-                        } else if strategy == .singlePut {
-                            Picker("Put Strike", selection: $selectedPutStrike) {
-                                ForEach(putStrikes, id: \.self) { s in
-                                    Text(OptionsFormat.number(s)).tag(Optional(s))
-                                }
-                            }
-                            .onChange(of: selectedPutStrike) { _, new in
-                                if let s = new { strikeText = OptionsFormat.number(s) }
-                            }
-                        } else {
-                            // Bull Call Spread: choose lower and upper call strikes
-                            Picker("Lower Call", selection: $selectedCallStrike) {
-                                ForEach(callStrikes, id: \.self) { s in
-                                    Text(OptionsFormat.number(s)).tag(Optional(s))
-                                }
-                            }
-                            .onChange(of: selectedCallStrike) { _, new in
-                                if let s = new { strikeText = OptionsFormat.number(s) }
-                            }
+                            if strategy == .singleCall {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text("Call").frame(maxWidth: .infinity, alignment: .center)
+                                        Text("Mid").frame(maxWidth: .infinity, alignment: .center).offset(x: -10)
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
 
-                            Picker("Upper Call", selection: $selectedPutStrike) {
-                                ForEach(callStrikes, id: \.self) { s in
-                                    Text(OptionsFormat.number(s)).tag(Optional(s))
+                                    Picker(selection: $selectedCallContract) {
+                                        Text("Select Call").tag(Optional<OptionContract>.none)
+                                        ForEach(appContractsFor(kind: .call), id: \.self) { c in
+                                            Text(contractMenuRowText(c))
+                                                .font(.body)
+                                                .monospacedDigit()
+                                                .tag(Optional(c))
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(selectedCallContract.map { OptionsFormat.number($0.strike) } ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                            Text((selectedCallContract?.mid ?? selectedCallContract?.last).map(OptionsFormat.number) ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                        }
+                                        .font(.body)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .onChange(of: selectedCallContract) { _, new in
+                                    #if DEBUG
+                                    if let c = new {
+                                        print("[DEBUG][ContentView] Selected Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                    }
+                                    #endif
+                                    if let c = new {
+                                        selectedCallStrike = c.strike
+                                        strikeText = OptionsFormat.number(c.strike)
+                                        if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
+                                    }
                                 }
                             }
-                            .onChange(of: selectedPutStrike) { _, new in
-                                if let s = new { shortCallStrikeText = OptionsFormat.number(s) }
+                            else if strategy == .singlePut {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack {
+                                        Text("Put").frame(maxWidth: .infinity, alignment: .center)
+                                        Text("Mid").frame(maxWidth: .infinity, alignment: .center).offset(x: -10)
+                                    }
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+
+                                    Picker(selection: $selectedPutContract) {
+                                        Text("Select Put").tag(Optional<OptionContract>.none)
+                                        ForEach(appContractsFor(kind: .put), id: \.self) { c in
+                                            Text(contractMenuRowText(c))
+                                                .font(.body)
+                                                .monospacedDigit()
+                                                .tag(Optional(c))
+                                        }
+                                    } label: {
+                                        HStack {
+                                            Text(selectedPutContract.map { OptionsFormat.number($0.strike) } ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                            Text((selectedPutContract?.mid ?? selectedPutContract?.last).map(OptionsFormat.number) ?? "—")
+                                                .monospacedDigit()
+                                                .frame(maxWidth: .infinity, alignment: .center)
+                                        }
+                                        .font(.body)
+                                    }
+                                    .frame(maxWidth: .infinity)
+                                }
+                                .onChange(of: selectedPutContract) { _, new in
+                                    #if DEBUG
+                                    if let c = new {
+                                        print("[DEBUG][ContentView] Selected Put -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                    }
+                                    #endif
+                                    if let c = new {
+                                        selectedPutStrike = c.strike
+                                        strikeText = OptionsFormat.number(c.strike)
+                                        if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
+                                    }
+                                }
                             }
                         }
                     }
+                    
+                    Toggle(isOn: $useMarketPremium) {
+                        Text("Use market mid for premium")
+                    }
+                    .toggleStyle(.switch)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
                 }
 
                 HStack(spacing: 12) {
@@ -397,30 +769,44 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
 
-                    Stepper(value: $contracts, in: 1...50) {
-                        VStack(alignment: .center, spacing: 2) {
-                            Text("Contracts:")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.75)
-                            Text("\(contracts)")
-                                .font(.body)
-                                .frame(maxWidth: .infinity, alignment: .center)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Stepper(value: $contracts, in: 1...50) {
+                            VStack(alignment: .center, spacing: 2) {
+                                Text("Contracts (×100 shares each):")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .layoutPriority(1)
+                                Text("\(contracts)")
+                                    .font(.body)
+                                    .frame(maxWidth: .infinity, alignment: .center)
+                            }
                         }
+                        .controlSize(.small)
+                        .frame(minWidth: 165, maxWidth: .infinity, alignment: .leading)
+
+                        Text("1 contract ≈ 100 shares")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
-                    .controlSize(.small)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 Divider()
 
-                Button {
-                    showWhatIfSheet = true
-                } label: {
-                    Label("What-If: Market Price at Expiration", systemImage: "slider.horizontal.3")
+                HStack(spacing: 12) {
+
+                    Button {
+                        showWhatIfSheet = true
+                    } label: {
+                        Label("What-If: Market Price at Expiration", systemImage: "slider.horizontal.3")
+                    }
+                    .buttonStyle(.bordered)
                 }
-                .buttonStyle(.bordered)
+                .alert("Saved", isPresented: $showSavedConfirmation) {
+                    Button("OK", role: .cancel) { }
+                } message: {
+                    Text("Your strategy was saved locally.")
+                }
                 .sheet(isPresented: $showWhatIfSheet) {
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
@@ -457,102 +843,238 @@ struct ContentView: View {
             }
         }
     }
+    
+    private var educationCard: some View {
+        GroupBox("Education") {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Payoff charts show profit/loss at expiration based on the selected strategy, strikes, and premiums.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    Link("Options basics", destination: URL(string: "https://www.investopedia.com/options-basics-tutorial-4583012")!)
+                    Link("Calls vs. Puts", destination: URL(string: "https://www.investopedia.com/ask/answers/042415/whats-difference-between-call-and-put-options.asp")!)
+                }
+                .font(.caption2)
+
+                // Strategy-specific tips
+                if strategy == .singleCall {
+                    DisclosureGroup("Tips for Calls", isExpanded: $showTipsCall) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("• Breakeven = strike + premium")
+                            Text("• Max loss = premium paid × contracts × multiplier")
+                            Text("• Upside is theoretically unlimited above strike")
+                            Text("• Consider time to expiration and implied volatility")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+                    }
+                } else if strategy == .singlePut {
+                    DisclosureGroup("Tips for Puts", isExpanded: $showTipsPut) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("• Breakeven = strike − premium")
+                            Text("• Max loss = premium paid × contracts × multiplier")
+                            Text("• Max gain occurs if underlying → 0")
+                            Text("• Useful for bearish views or as protection")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+                    }
+                } else if strategy == .bullCallSpread {
+                    DisclosureGroup("Tips for Bull Call Spreads", isExpanded: $showTipsSpread) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("• Buy lower-strike call, sell higher-strike call (same expiration)")
+                            Text("• Net premium is typically a debit (reduced vs. single call)")
+                            Text("• Max gain = (upper − lower) × contracts × multiplier − net debit")
+                            Text("• Max loss = net debit paid")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
+                    }
+                }
+
+                DisclosureGroup("Glossary", isExpanded: $showGlossary) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("• Debit/Credit: Net premium paid (debit) or received (credit)")
+                        Text("• Breakeven: Price where payoff crosses zero at expiration")
+                        Text("• Multiplier: Typically 100 shares per contract for US equity options")
+                        Text("• Contracts: ‘× N’ indicates number of contracts; each is typically 100 shares.")
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 4)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
 
     private var resultsCard: some View {
-        GroupBox("Results (at Expiration)") {
-            VStack(spacing: 10) {
-                HStack {
+        GroupBox("Results") {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
                     metricTile(title: "Max Loss", value: OptionsFormat.money(metrics.maxLoss))
                     metricTile(title: "Breakeven", value: metrics.breakeven.map(OptionsFormat.money) ?? "—")
                     metricTile(title: "Max Gain", value: maxGainText)
-                    metricTile(title: netPremiumLabel, value: OptionsFormat.money(multiAnalysis.totalDebit))
+                    metricTile(title: "Net Premium", value: netPremiumValueText, valueColor: netPremiumColor)
+
                 }
-
-                Divider()
-
-                let pl = multiAnalysis.profitLoss(at: expirySpot)
-                HStack {
-                    Text("P/L at \(OptionsFormat.number(expirySpot)):")
-                        .font(.subheadline)
-                    Spacer()
-                    Text(OptionsFormat.money(pl))
-                        .font(.subheadline.weight(.semibold))
-                }
-
-                Text("Net Premium is the sum of premiums paid and received for all legs. Positive = cash paid to open; negative = cash received to open.")
-                    .font(.caption)
+                Text("Results reflect payoff at expiration and exclude fees, taxes, and early assignment.")
+                    .font(.caption2)
                     .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private var chartCard: some View {
-        GroupBox("Payoff Curve") {
+        GroupBox("Payoff at Expiration") {
             VStack(alignment: .leading, spacing: 8) {
-                Chart {
-                    ForEach(curve) { p in
-                        LineMark(
-                            x: .value("Market Price", p.underlying),
-                            y: .value("P/L", p.profitLoss)
-                        )
-                    }
-
-                    // Zero line
-                    RuleMark(y: .value("Break-even", 0))
-                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-
-                    // Strike line(s)
-                    if strategy.isSingle {
-                        if let first = legs.first {
-                            RuleMark(x: .value("Strike", first.strike))
-                                .lineStyle(StrokeStyle(lineWidth: 1))
-                        }
-                    } else {
-                        RuleMark(x: .value("Lower Strike", lowerStrike))
-                            .lineStyle(StrokeStyle(lineWidth: 1))
-                        RuleMark(x: .value("Upper Strike", upperStrike))
-                            .lineStyle(StrokeStyle(lineWidth: 1))
-                    }
-
-                    // Marker for selected expiry spot
-                    PointMark(
-                        x: .value("Expiry Spot", expirySpot),
-                        y: .value("P/L", multiAnalysis.profitLoss(at: expirySpot))
+                Chart(curve) { pt in
+                    LineMark(
+                        x: .value("Underlying", pt.underlying),
+                        y: .value("P/L", pt.profitLoss)
                     )
+                    .foregroundStyle(.blue)
                 }
-                .frame(height: 260)
-
-                Text("Tip: This is payoff at expiration only (ignores IV changes, time value, early assignment, and bid/ask spreads).")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var educationCard: some View {
-        GroupBox {
-            DisclosureGroup("Education") {
-                VStack(alignment: .leading, spacing: 8) {
-                    if strategy == .bullCallSpread {
-                        Text("• Bull Call Spread = Buy lower-strike call, sell higher-strike call.")
-                        Text("• Max loss = net debit paid.")
-                        Text("• Max gain = spread width − net debit.")
-                        Text("• Breakeven ≈ lower strike + net debit.")
-                    } else {
-                        Text("• Max loss is the premium you pay (debit).")
-                        Text(strategy == .singleCall
-                             ? "• Call breakeven = strike + premium."
-                             : "• Put breakeven = strike − premium.")
-                        Text("• The chart helps you plan outcomes across different prices at expiration.")
+                .chartYAxisLabel(position: .leading) { Text("P/L ($)") }
+                .chartXAxisLabel(position: .bottom) { Text("Underlying Price ($)") }
+                .chartYScale(domain: .automatic(includesZero: false))
+                .chartPlotStyle { plot in
+                    plot.background(.ultraThinMaterial)
+                }
+                .overlay(
+                    ZStack {
+                        // Zero P/L baseline
+                        Chart {
+                            RuleMark(y: .value("Zero", 0))
+                                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4]))
+                                .foregroundStyle(.secondary)
+                        }
+                        // Expiry spot marker
+                        Chart {
+                            RuleMark(x: .value("Expiry Spot", expirySpot))
+                                .lineStyle(StrokeStyle(lineWidth: 1))
+                                .foregroundStyle(.orange)
+                                .annotation(position: .top, spacing: 2) {
+                                    Text("Expiry spot")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                        }
+                        // Breakeven marker (if any)
+                        if let be = metrics.breakeven {
+                            Chart {
+                                RuleMark(x: .value("Breakeven", be))
+                                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [6]))
+                                    .foregroundStyle(.green)
+                                    .annotation(position: .top, spacing: 2) {
+                                        Text("Breakeven")
+                                            .font(.caption2)
+                                            .foregroundStyle(.green)
+                                    }
+                            }
+                        }
                     }
-                }
-                .font(.footnote)
-                .foregroundStyle(.secondary)
+                )
+                .frame(height: 240)
+
+                Text("Drag the What‑If slider to shift the price range and markers.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
         }
     }
 
     // MARK: - Helpers
+
+    private func buildSavedStrategy() -> SavedStrategy {
+        let kind: SavedStrategy.Kind
+        switch strategy {
+        case .singleCall: kind = .singleCall
+        case .singlePut: kind = .singlePut
+        case .bullCallSpread: kind = .bullCallSpread
+        }
+        func savedLeg(from leg: OptionLeg) -> SavedStrategy.SavedLeg {
+            SavedStrategy.SavedLeg(
+                type: leg.type == .call ? "call" : "put",
+                side: leg.side == .long ? "long" : "short",
+                strike: leg.strike,
+                premium: leg.premium,
+                contracts: leg.contracts,
+                multiplier: leg.multiplier
+            )
+        }
+        return SavedStrategy(
+            kind: kind,
+            symbol: symbolText,
+            expiration: selectedExpiration,
+            legs: legs.map(savedLeg),
+            marketPriceAtSave: Double(underlyingNowText),
+            note: nil
+        )
+    }
+
+    private func saveCurrentStrategy() {
+        let snapshot = buildSavedStrategy()
+        StrategyStore.shared.append(snapshot)
+        #if DEBUG
+        print("[DEBUG][ContentView] Saved strategy: \(snapshot.kind) for \(snapshot.symbol) exp=\(String(describing: snapshot.expiration)) legs=\(snapshot.legs.count)")
+        #endif
+        showSavedConfirmation = true
+    }
+    
+    // Rebuilds the provider from persisted storage tokens and environment
+    private func rebuildProviderFromStorage() {
+        #if DEBUG
+        print("[DEBUG][ContentView] Rebuilding provider from storage…")
+        #endif
+        isUsingCustomProvider = false
+        if let provider = SettingsViewModel.BYOProvider(rawValue: lastEnabledProviderRaw) {
+            switch provider {
+            case .tradier:
+                if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradierToken) {
+                    let env: TradierProvider.Environment = (tradierEnvironmentRaw == "sandbox") ? .sandbox : .production
+                    appQuoteService = QuoteService(provider: TradierProvider(token: token, environment: env))
+                    isUsingCustomProvider = true
+                }
+            case .finnhub:
+                if let token = KeychainHelper.load(key: KeychainHelper.Keys.finnhubToken) {
+                    appQuoteService = QuoteService(provider: FinnhubProvider(token: token))
+                    isUsingCustomProvider = true
+                }
+            case .polygon:
+                if let token = KeychainHelper.load(key: KeychainHelper.Keys.polygonToken) {
+                    appQuoteService = QuoteService(provider: PolygonProvider(token: token))
+                    isUsingCustomProvider = true
+                }
+            case .tradestation:
+                if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradestationToken) {
+                    appQuoteService = QuoteService(provider: TradeStationProvider(token: token))
+                    isUsingCustomProvider = true
+                }
+            }
+        }
+        if !isUsingCustomProvider {
+            appQuoteService = QuoteService()
+        }
+        #if DEBUG
+        print("[DEBUG][ContentView] Provider:", isUsingCustomProvider ? "Custom" : "Yahoo fallback")
+        #endif
+    }
+
+    private func nearestStrike(to price: Double, in strikes: [Double]) -> Double? {
+        guard !strikes.isEmpty else { return nil }
+        return strikes.min(by: { abs($0 - price) < abs($1 - price) })
+    }
+
+    private func nextHigherStrike(after strike: Double, in strikes: [Double]) -> Double? {
+        let higher = strikes.filter { $0 > strike }.sorted()
+        return higher.first
+    }
 
     private func clearOptionInputsForUnavailableChain() {
         expirations = []
@@ -565,6 +1087,65 @@ struct ContentView: View {
         premiumText = ""
         shortCallStrikeText = ""
         shortCallPremiumText = ""
+        cachedCallContracts = []
+        cachedPutContracts = []
+        selectedCallContract = nil
+        selectedPutContract = nil
+    }
+    
+    private func appContractsFor(kind: OptionContract.Kind) -> [OptionContract] {
+        return (kind == .call) ? cachedCallContracts : cachedPutContracts
+    }
+    
+    private func contractLabel(_ c: OptionContract) -> String {
+        let k = OptionsFormat.number(c.strike)
+        if let b = c.bid, let a = c.ask, b > 0, a > 0 {
+            let mid = (b + a) / 2.0
+            return "\(k)  \(OptionsFormat.number(mid))"
+        } else if let last = c.last {
+            return "\(k)  \(OptionsFormat.number(last))"
+        } else {
+            return k
+        }
+    }
+    
+    private func padRight(_ s: String, to width: Int) -> String {
+        let n = s.count
+        if n >= width { return s }
+        return s + String(repeating: " ", count: width - n)
+    }
+
+    private func contractMenuRowText(_ c: OptionContract) -> String {
+        let strike = OptionsFormat.number(c.strike)
+        let mid = (c.mid ?? c.last).map(OptionsFormat.number) ?? "—"
+        // Base width is the max strike width for this kind, plus an extra buffer to push Mid further right
+        let baseWidth = (c.kind == .put) ? putMenuStrikeWidth : callMenuStrikeWidth
+        let extraBuffer = 8 // increase/decrease to move Mid further right/left
+        let targetWidth = max(baseWidth + extraBuffer, strike.count + extraBuffer)
+        let paddedStrike = padRight(strike, to: targetWidth)
+        return "\(paddedStrike)\(mid)"
+    }
+    
+    private func filteredLongCallContracts() -> [OptionContract] {
+        let all = appContractsFor(kind: .call)
+        guard let upper = selectedPutStrike else { return all }
+        // Only filter if upper is greater than the currently selected lower (if any)
+        if let lower = selectedCallStrike, upper <= lower { return all }
+        // If upper is not above the minimum strike, don't filter
+        let minStrike = all.map { $0.strike }.min() ?? .leastNonzeroMagnitude
+        if upper <= minStrike { return all }
+        let filtered = all.filter { $0.strike < upper }
+        return filtered.isEmpty ? all : filtered
+    }
+
+    private func filteredShortCallContracts() -> [OptionContract] {
+        let all = appContractsFor(kind: .call)
+        guard let lower = selectedCallStrike else { return all }
+        // If lower is not below the maximum strike, don't filter
+        let maxStrike = all.map { $0.strike }.max() ?? .greatestFiniteMagnitude
+        if lower >= maxStrike { return all }
+        let filtered = all.filter { $0.strike > lower }
+        return filtered.isEmpty ? all : filtered
     }
 
     private func lookupSymbol() async {
@@ -591,8 +1172,63 @@ struct ContentView: View {
                 expirations = chain.expirations
                 callStrikes = chain.callStrikes
                 putStrikes = chain.putStrikes
-                // If we don't have a selected expiration yet, choose the nearest
-                if selectedExpiration == nil { selectedExpiration = expirations.first }
+                cachedCallContracts = chain.callContracts
+                cachedPutContracts  = chain.putContracts
+
+                callMenuStrikeWidth = cachedCallContracts.map { OptionsFormat.number($0.strike).count }.max() ?? 0
+                putMenuStrikeWidth  = cachedPutContracts.map  { OptionsFormat.number($0.strike).count }.max() ?? 0
+                
+                #if DEBUG
+                let pricedCalls = cachedCallContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
+                let pricedPuts  = cachedPutContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
+                print("[DEBUG][ContentView] Cached contracts -> calls: \(cachedCallContracts.count) (priced: \(pricedCalls.count)), puts: \(cachedPutContracts.count) (priced: \(pricedPuts.count))")
+                if let c0 = cachedCallContracts.first {
+                    print("[DEBUG][ContentView] Sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))")
+                }
+                if let p0 = cachedPutContracts.first {
+                    print("[DEBUG][ContentView] Sample put: strike=\(p0.strike) bid=\(String(describing: p0.bid)) ask=\(String(describing: p0.ask)) last=\(String(describing: p0.last)) mid=\(String(describing: p0.mid))")
+                }
+                #endif
+                
+                // If we don't have a selected expiration yet, choose the nearest and suppress refetch
+                if selectedExpiration == nil {
+                    selectedExpiration = expirations.first
+                    suppressExpirationRefetch = true
+                }
+                // Auto-select near-the-money strikes and contracts
+                let price = Double(underlyingNowText) ?? expirySpot
+                if strategy == .singleCall {
+                    if let s = nearestStrike(to: price, in: callStrikes) {
+                        selectedCallStrike = s
+                        strikeText = OptionsFormat.number(s)
+                        selectedCallContract = cachedCallContracts.first(where: { $0.strike == s })
+                        if useMarketPremium, let mid = selectedCallContract?.mid {
+                            premiumText = OptionsFormat.number(mid)
+                        }
+                    }
+                } else if strategy == .singlePut {
+                    if let s = nearestStrike(to: price, in: putStrikes) {
+                        selectedPutStrike = s
+                        strikeText = OptionsFormat.number(s)
+                        selectedPutContract = cachedPutContracts.first(where: { $0.strike == s })
+                        if useMarketPremium, let mid = selectedPutContract?.mid {
+                            premiumText = OptionsFormat.number(mid)
+                        }
+                    }
+                } else {
+                    // Bull Call Spread: choose lower ~ATM and upper next higher if available
+                    if let lower = nearestStrike(to: price, in: callStrikes) {
+                        selectedCallStrike = lower
+                        strikeText = OptionsFormat.number(lower)
+                        selectedCallContract = cachedCallContracts.first(where: { $0.strike == lower })
+                        if useMarketPremium, let mid = selectedCallContract?.mid {
+                            premiumText = OptionsFormat.number(mid)
+                        }
+                        let upper = nextHigherStrike(after: lower, in: callStrikes) ?? lower
+                        selectedPutStrike = upper
+                        selectedPutContract = cachedCallContracts.first(where: { $0.strike == upper })
+                    }
+                }
             }
         } catch {
             await MainActor.run {
@@ -615,8 +1251,59 @@ struct ContentView: View {
             await MainActor.run {
                 callStrikes = chain.callStrikes
                 putStrikes = chain.putStrikes
+                cachedCallContracts = chain.callContracts
+                cachedPutContracts  = chain.putContracts
+
+                callMenuStrikeWidth = cachedCallContracts.map { OptionsFormat.number($0.strike).count }.max() ?? 0
+                putMenuStrikeWidth  = cachedPutContracts.map  { OptionsFormat.number($0.strike).count }.max() ?? 0
+
+                #if DEBUG
+                let pricedCalls = cachedCallContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
+                let pricedPuts  = cachedPutContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
+                print("[DEBUG][ContentView] (Refetch) Cached contracts -> calls: \(cachedCallContracts.count) (priced: \(pricedCalls.count)), puts: \(cachedPutContracts.count) (priced: \(pricedPuts.count))")
+                if let c0 = cachedCallContracts.first {
+                    print("[DEBUG][ContentView] (Refetch) Sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))")
+                }
+                if let p0 = cachedPutContracts.first {
+                    print("[DEBUG][ContentView] (Refetch) Sample put: strike=\(p0.strike) bid=\(String(describing: p0.bid)) ask=\(String(describing: p0.ask)) last=\(String(describing: p0.last)) mid=\(String(describing: p0.mid))")
+                }
+                #endif
+
                 lastRefresh = Date()
                 isFetching = false
+                // Auto-select near-the-money strikes and contracts for the selected expiration
+                let price = Double(underlyingNowText) ?? expirySpot
+                if strategy == .singleCall {
+                    if let s = nearestStrike(to: price, in: callStrikes) {
+                        selectedCallStrike = s
+                        strikeText = OptionsFormat.number(s)
+                        selectedCallContract = cachedCallContracts.first(where: { $0.strike == s })
+                        if useMarketPremium, let mid = selectedCallContract?.mid {
+                            premiumText = OptionsFormat.number(mid)
+                        }
+                    }
+                } else if strategy == .singlePut {
+                    if let s = nearestStrike(to: price, in: putStrikes) {
+                        selectedPutStrike = s
+                        strikeText = OptionsFormat.number(s)
+                        selectedPutContract = cachedPutContracts.first(where: { $0.strike == s })
+                        if useMarketPremium, let mid = selectedPutContract?.mid {
+                            premiumText = OptionsFormat.number(mid)
+                        }
+                    }
+                } else {
+                    if let lower = nearestStrike(to: price, in: callStrikes) {
+                        selectedCallStrike = lower
+                        strikeText = OptionsFormat.number(lower)
+                        selectedCallContract = cachedCallContracts.first(where: { $0.strike == lower })
+                        if useMarketPremium, let mid = selectedCallContract?.mid {
+                            premiumText = OptionsFormat.number(mid)
+                        }
+                        let upper = nextHigherStrike(after: lower, in: callStrikes) ?? lower
+                        selectedPutStrike = upper
+                        selectedPutContract = cachedCallContracts.first(where: { $0.strike == upper })
+                    }
+                }
             }
         } catch {
             await MainActor.run {
@@ -636,12 +1323,20 @@ struct ContentView: View {
         return "Unlimited"
     }
 
-    private var netPremiumLabel: String {
-        let v = multiAnalysis.totalDebit
-        if v > 0 { return "Net Premium (Debit)" }
-        if v < 0 { return "Net Premium (Credit)" }
-        return "Net Premium (Even)"
-    }
+    private var netPremiumValueText: String {
+          let v = multiAnalysis.totalDebit
+          let absMoney = OptionsFormat.money(abs(v))
+          if v > 0 { return "-" + absMoney } // debit shown as negative
+          if v < 0 { return "+" + absMoney } // credit shown as positive
+          return absMoney
+      }
+
+      private var netPremiumColor: Color {
+          let v = multiAnalysis.totalDebit
+          if v > 0 { return .red }
+          if v < 0 { return .green }
+          return .primary
+      }
 
     private enum PPKeyboardType {
         case `default`
@@ -669,7 +1364,7 @@ struct ContentView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func metricTile(title: String, value: String) -> some View {
+    private func metricTile(title: String, value: String, valueColor: Color? = nil) -> some View {
         // Ensure the title's last line aligns across tiles by reserving space for up to 2 lines
         #if canImport(UIKit)
         let headerMinHeight = UIFont.preferredFont(forTextStyle: .caption1).lineHeight * 2
@@ -689,6 +1384,7 @@ struct ContentView: View {
 
             Text(value)
                 .font(.caption2)
+                .foregroundStyle(valueColor ?? .primary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 8)
