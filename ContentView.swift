@@ -103,15 +103,11 @@ struct ContentView: View {
 
     @State private var lastRefresh: Date?
     @State private var showSettings: Bool = false
+    @State private var showSavedConfirmation: Bool = false
     @State private var symbolLookupTask: Task<Void, Never>? = nil
     @State private var showWhatIfSheet: Bool = false
-    @State private var showTipsCall: Bool = false
-    @State private var showTipsPut: Bool = false
-    @State private var showTipsSpread: Bool = false
-    @State private var showGlossary: Bool = false
+    @State private var showEducation: Bool = false
 
-    @State private var showSavedConfirmation: Bool = false
-    
     @AppStorage("lastEnabledProvider") private var lastEnabledProviderRaw: String = ""
     @AppStorage("tradierEnvironment") private var tradierEnvironmentRaw: String = "production"
     @State private var appQuoteService: QuoteService = QuoteService()
@@ -277,6 +273,10 @@ struct ContentView: View {
         return "Delayed data via Yahoo"
     }
 
+    private var isDelayedBadgeVisible: Bool {
+        return !isUsingCustomProvider
+    }
+
     // MARK: - UI
 
     private var inputsCard: some View {
@@ -303,8 +303,17 @@ struct ContentView: View {
 
                 HStack {
                     HStack(spacing: 6) {
-                        Image(systemName: "clock")
+                        Image(systemName: isDelayedBadgeVisible ? "clock.badge.exclamationmark" : "bolt.fill")
                         Text("\(dataSourceLabel) • \(lastRefresh.map { $0.formatted(date: .abbreviated, time: .standard) } ?? "—")")
+                        if isDelayedBadgeVisible {
+                            Text("Delayed")
+                                .font(.caption2)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.orange.opacity(0.15))
+                                .foregroundStyle(.orange)
+                                .clipShape(Capsule())
+                        }
                     }
                     .font(.caption2)
                     .padding(6)
@@ -349,7 +358,7 @@ struct ContentView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Option Chain (delayed)")
+                    Text("Option Chain" + (isDelayedBadgeVisible ? " (delayed)" : ""))
                         .font(.subheadline)
                     
                     if strategy == .bullCallSpread {
@@ -772,7 +781,7 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Stepper(value: $contracts, in: 1...50) {
                             VStack(alignment: .center, spacing: 2) {
-                                Text("Contracts (×100 shares each):")
+                                Text("Contracts")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                                     .lineLimit(1)
@@ -799,6 +808,9 @@ struct ContentView: View {
                         showWhatIfSheet = true
                     } label: {
                         Label("What-If: Market Price at Expiration", systemImage: "slider.horizontal.3")
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .minimumScaleFactor(0.8) 
                     }
                     .buttonStyle(.bordered)
                 }
@@ -837,7 +849,7 @@ struct ContentView: View {
                     .presentationDetents([.large])
                 }
 
-                Text("Premiums are manual; quotes are delayed.")
+                Text(quotesFooterText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -845,22 +857,23 @@ struct ContentView: View {
     }
     
     private var educationCard: some View {
-        GroupBox("Education") {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Payoff charts show profit/loss at expiration based on the selected strategy, strikes, and premiums.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        GroupBox {
+            DisclosureGroup("Education", isExpanded: $showEducation) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Payoff charts show profit/loss at expiration based on the selected strategy, strikes, and premiums.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
-                HStack(spacing: 12) {
-                    Link("Options basics", destination: URL(string: "https://www.investopedia.com/options-basics-tutorial-4583012")!)
-                    Link("Calls vs. Puts", destination: URL(string: "https://www.investopedia.com/ask/answers/042415/whats-difference-between-call-and-put-options.asp")!)
-                }
-                .font(.caption2)
+                    HStack(spacing: 12) {
+                        Link("Options basics", destination: URL(string: "https://www.investopedia.com/options-basics-tutorial-4583012")!)
+                        Link("Calls vs. Puts", destination: URL(string: "https://www.investopedia.com/ask/answers/042415/whats-difference-between-call-and-put-options.asp")!)
+                    }
+                    .font(.caption2)
 
-                // Strategy-specific tips
-                if strategy == .singleCall {
-                    DisclosureGroup("Tips for Calls", isExpanded: $showTipsCall) {
+                    // Strategy-specific tips (no disclosure)
+                    if strategy == .singleCall {
                         VStack(alignment: .leading, spacing: 6) {
+                            Text("Tips for Calls").font(.caption).foregroundStyle(.secondary)
                             Text("• Breakeven = strike + premium")
                             Text("• Max loss = premium paid × contracts × multiplier")
                             Text("• Upside is theoretically unlimited above strike")
@@ -869,10 +882,9 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .padding(.top, 4)
-                    }
-                } else if strategy == .singlePut {
-                    DisclosureGroup("Tips for Puts", isExpanded: $showTipsPut) {
+                    } else if strategy == .singlePut {
                         VStack(alignment: .leading, spacing: 6) {
+                            Text("Tips for Puts").font(.caption).foregroundStyle(.secondary)
                             Text("• Breakeven = strike − premium")
                             Text("• Max loss = premium paid × contracts × multiplier")
                             Text("• Max gain occurs if underlying → 0")
@@ -881,10 +893,9 @@ struct ContentView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .padding(.top, 4)
-                    }
-                } else if strategy == .bullCallSpread {
-                    DisclosureGroup("Tips for Bull Call Spreads", isExpanded: $showTipsSpread) {
+                    } else if strategy == .bullCallSpread {
                         VStack(alignment: .leading, spacing: 6) {
+                            Text("Tips for Bull Call Spreads").font(.caption).foregroundStyle(.secondary)
                             Text("• Buy lower-strike call, sell higher-strike call (same expiration)")
                             Text("• Net premium is typically a debit (reduced vs. single call)")
                             Text("• Max gain = (upper − lower) × contracts × multiplier − net debit")
@@ -894,10 +905,10 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .padding(.top, 4)
                     }
-                }
 
-                DisclosureGroup("Glossary", isExpanded: $showGlossary) {
+                    // Glossary (no disclosure)
                     VStack(alignment: .leading, spacing: 6) {
+                        Text("Glossary").font(.caption).foregroundStyle(.secondary)
                         Text("• Debit/Credit: Net premium paid (debit) or received (credit)")
                         Text("• Breakeven: Price where payoff crosses zero at expiration")
                         Text("• Multiplier: Typically 100 shares per contract for US equity options")
@@ -907,8 +918,8 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .padding(.top, 4)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -991,43 +1002,8 @@ struct ContentView: View {
 
     // MARK: - Helpers
 
-    private func buildSavedStrategy() -> SavedStrategy {
-        let kind: SavedStrategy.Kind
-        switch strategy {
-        case .singleCall: kind = .singleCall
-        case .singlePut: kind = .singlePut
-        case .bullCallSpread: kind = .bullCallSpread
-        }
-        func savedLeg(from leg: OptionLeg) -> SavedStrategy.SavedLeg {
-            SavedStrategy.SavedLeg(
-                type: leg.type == .call ? "call" : "put",
-                side: leg.side == .long ? "long" : "short",
-                strike: leg.strike,
-                premium: leg.premium,
-                contracts: leg.contracts,
-                multiplier: leg.multiplier
-            )
-        }
-        return SavedStrategy(
-            kind: kind,
-            symbol: symbolText,
-            expiration: selectedExpiration,
-            legs: legs.map(savedLeg),
-            marketPriceAtSave: Double(underlyingNowText),
-            note: nil
-        )
-    }
-
-    private func saveCurrentStrategy() {
-        let snapshot = buildSavedStrategy()
-        StrategyStore.shared.append(snapshot)
-        #if DEBUG
-        print("[DEBUG][ContentView] Saved strategy: \(snapshot.kind) for \(snapshot.symbol) exp=\(String(describing: snapshot.expiration)) legs=\(snapshot.legs.count)")
-        #endif
-        showSavedConfirmation = true
-    }
-    
-    // Rebuilds the provider from persisted storage tokens and environment
+    // Rebuild/refresh the provider-related state from persisted storage.
+    // Minimal implementation to satisfy compile-time references without external dependencies.
     private func rebuildProviderFromStorage() {
         #if DEBUG
         print("[DEBUG][ContentView] Rebuilding provider from storage…")
@@ -1064,6 +1040,32 @@ struct ContentView: View {
         #if DEBUG
         print("[DEBUG][ContentView] Provider:", isUsingCustomProvider ? "Custom" : "Yahoo fallback")
         #endif
+    }
+
+    // Returns the start of the given date in the specified time zone
+    private func startOfDay(_ date: Date, in timeZoneIdentifier: String) -> Date {
+        var calendar = Calendar(identifier: .gregorian)
+        if let tz = TimeZone(identifier: timeZoneIdentifier) {
+            calendar.timeZone = tz
+        }
+        return calendar.startOfDay(for: date)
+    }
+
+    // Filters expirations to those on/after the start of today in the provider's time zone (US/Eastern)
+    private func filterExpirationsForProviderTZ(_ dates: [Date]) -> [Date] {
+        let easternID = "America/New_York"
+        var calendar = Calendar(identifier: .gregorian)
+        if let tz = TimeZone(identifier: easternID) {
+            calendar.timeZone = tz
+        }
+        // Start of today in Eastern
+        let easternStartOfToday = calendar.startOfDay(for: Date())
+        // Keep expirations whose Eastern calendar day is today or later
+        let filtered = dates.filter { d in
+            let dayStart = calendar.startOfDay(for: d)
+            return dayStart >= easternStartOfToday
+        }
+        return filtered.isEmpty ? dates : filtered
     }
 
     private func nearestStrike(to price: Double, in strikes: [Double]) -> Double? {
@@ -1169,7 +1171,23 @@ struct ContentView: View {
         do {
             let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: selectedExpiration)
             await MainActor.run {
-                expirations = chain.expirations
+                expirations = filterExpirationsForProviderTZ(chain.expirations)
+                
+                #if DEBUG
+                let rawCount = chain.expirations.count
+                let filteredCount = filterExpirationsForProviderTZ(chain.expirations).count
+                print("[DEBUG][ContentView] Expirations raw=\(rawCount), filtered(Eastern today+)=\(filteredCount)")
+                if let firstRaw = chain.expirations.first {
+                    print("[DEBUG][ContentView] First raw expiration:", firstRaw.formatted(date: .abbreviated, time: .omitted))
+                }
+                if let firstFiltered = expirations.first {
+                    print("[DEBUG][ContentView] First filtered expiration:", firstFiltered.formatted(date: .abbreviated, time: .omitted))
+                }
+                #endif
+                if expirations.isEmpty && fetchError == nil {
+                    fetchError = "Option chain unavailable (no expirations)."
+                }
+                
                 callStrikes = chain.callStrikes
                 putStrikes = chain.putStrikes
                 cachedCallContracts = chain.callContracts
@@ -1245,10 +1263,30 @@ struct ContentView: View {
     }
 
     private func refetchForExpiration() async {
-        await MainActor.run { isFetching = true; fetchError = nil }
+        await MainActor.run {
+            isFetching = true
+            fetchError = nil
+        }
         do {
             let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: selectedExpiration)
             await MainActor.run {
+                expirations = filterExpirationsForProviderTZ(chain.expirations)
+                
+                #if DEBUG
+                let rawCount = chain.expirations.count
+                let filteredCount = filterExpirationsForProviderTZ(chain.expirations).count
+                print("[DEBUG][ContentView] Expirations raw=\(rawCount), filtered(Eastern today+)=\(filteredCount)")
+                if let firstRaw = chain.expirations.first {
+                    print("[DEBUG][ContentView] First raw expiration:", firstRaw.formatted(date: .abbreviated, time: .omitted))
+                }
+                if let firstFiltered = expirations.first {
+                    print("[DEBUG][ContentView] First filtered expiration:", firstFiltered.formatted(date: .abbreviated, time: .omitted))
+                }
+                #endif
+                if expirations.isEmpty && fetchError == nil {
+                    fetchError = "Option chain unavailable (no expirations)."
+                }
+                
                 callStrikes = chain.callStrikes
                 putStrikes = chain.putStrikes
                 cachedCallContracts = chain.callContracts
@@ -1391,6 +1429,84 @@ struct ContentView: View {
         .padding(.horizontal, 6)
         .background(.thinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+    
+    private var hasSelectedMarketPremium: Bool {
+        if !useMarketPremium { return false }
+        switch strategy {
+        case .singleCall:
+            return (selectedCallContract?.mid ?? selectedCallContract?.last) != nil
+        case .singlePut:
+            return (selectedPutContract?.mid ?? selectedPutContract?.last) != nil
+        case .bullCallSpread:
+            let longHas = (selectedCallContract?.mid ?? selectedCallContract?.last) != nil
+            let shortHas = (selectedPutContract?.mid ?? selectedPutContract?.last) != nil
+            return longHas || shortHas
+        }
+    }
+
+    private var providerCaption: String {
+        if !isUsingCustomProvider {
+            return "quotes are delayed via Yahoo"
+        }
+        if let provider = SettingsViewModel.BYOProvider(rawValue: lastEnabledProviderRaw) {
+            switch provider {
+            case .tradier:
+                return tradierEnvironmentRaw == "sandbox" ? "quotes via Tradier Sandbox" : "quotes via Tradier"
+            case .finnhub:
+                return "quotes via Finnhub"
+            case .polygon:
+                return "quotes via Polygon"
+            case .tradestation:
+                return "quotes via TradeStation"
+            }
+        }
+        return "quotes are delayed via Yahoo"
+    }
+
+    private var quotesFooterText: String {
+        let premiumPart = hasSelectedMarketPremium ? "Premiums use market mid when available" : "Premiums are manual"
+//        let providerPart = providerCaption
+        let providerPart = ""
+        return "\(premiumPart); \(providerPart)."
+    }
+
+    // MARK: - Saving Current Strategy
+    private func saveCurrentStrategy() {
+        // Map current UI state to a SavedStrategy and persist it
+        let savedKind: SavedStrategy.Kind
+        switch strategy {
+        case .singleCall: savedKind = .singleCall
+        case .singlePut: savedKind = .singlePut
+        case .bullCallSpread: savedKind = .bullCallSpread
+        }
+
+        // Map working legs (OptionLeg) into SavedLegs for persistence
+        let savedLegs: [SavedStrategy.SavedLeg] = legs.map { leg in
+            let typeString = (leg.type == .call) ? "call" : "put"
+            let sideString = (leg.side == .long) ? "long" : "short"
+            return SavedStrategy.SavedLeg(
+                type: typeString,
+                side: sideString,
+                strike: leg.strike,
+                premium: leg.premium,
+                contracts: leg.contracts,
+                multiplier: leg.multiplier
+            )
+        }
+
+        let trimmedSymbol = symbolText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let saved = SavedStrategy(
+            kind: savedKind,
+            symbol: trimmedSymbol,
+            expiration: selectedExpiration,
+            legs: savedLegs,
+            marketPriceAtSave: underlyingNow,
+            note: nil
+        )
+
+        StrategyStore.shared.append(saved)
+        showSavedConfirmation = true
     }
 }
 
