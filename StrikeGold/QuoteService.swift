@@ -196,6 +196,20 @@ struct TradierProvider: QuoteDataProvider {
             }
         }
 
+        #if DEBUG
+        print("[DEBUG][QuoteService] Provider chain -> expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced: \(callContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }.count + putContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }.count)")
+        if let ex = expirations.first { print("[DEBUG][QuoteService] Provider first expiration: \(ex)") }
+        if let sample = callContracts.first {
+            let mid: Double? = {
+                if let b = sample.bid, let a = sample.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
+                if let b = sample.bid, b > 0 { return b }
+                if let a = sample.ask, a > 0 { return a }
+                return sample.last
+            }()
+            print("[DEBUG][QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: mid))")
+        }
+        #endif
+
         return OptionChainData(expirations: expirations, callStrikes: callStrikes, putStrikes: putStrikes, callContracts: callContracts, putContracts: putContracts)
     }
 
@@ -751,11 +765,24 @@ actor QuoteService {
         if let provider {
             do {
                 let data = try await provider.fetchOptionChain(symbol: trimmed, expiration: expiration)
+                var combinedContracts: [OptionContract] = []
+                combinedContracts.reserveCapacity(data.callContracts.count + data.putContracts.count)
+                combinedContracts.append(contentsOf: data.callContracts)
+                combinedContracts.append(contentsOf: data.putContracts)
+                let pricedProvider: [OptionContract] = combinedContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
+
                 #if DEBUG
-                let pricedProvider = (data.callContracts + data.putContracts).filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
                 print("[DEBUG][QuoteService] Provider chain -> expirations: \(data.expirations.count), calls: \(data.callContracts.count), puts: \(data.putContracts.count), priced: \(pricedProvider.count)")
                 if let ex = data.expirations.first { print("[DEBUG][QuoteService] Provider first expiration: \(ex)") }
-                if let sample = data.callContracts.first { print("[DEBUG][QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: sample.mid))") }
+                if let sample = data.callContracts.first {
+                    let mid: Double? = {
+                        if let b = sample.bid, let a = sample.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
+                        if let b = sample.bid, b > 0 { return b }
+                        if let a = sample.ask, a > 0 { return a }
+                        return sample.last
+                    }()
+                    print("[DEBUG][QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: mid))")
+                }
                 #endif
                 // If provider returned contracts with any pricing, use it; otherwise fall back to Yahoo
                 let hasAnyPrice = !pricedProvider.isEmpty
@@ -804,7 +831,15 @@ actor QuoteService {
             let pricedPuts  = putContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
             print("[DEBUG][YahooOptions] expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced calls: \(pricedCalls.count), priced puts: \(pricedPuts.count)")
             if let firstExp = expirations.first { print("[DEBUG][YahooOptions] first expiration: \(firstExp)") }
-            if let c0 = callContracts.first { print("[DEBUG][YahooOptions] sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))") }
+            if let c0 = callContracts.first {
+                let mid: Double? = {
+                    if let b = c0.bid, let a = c0.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
+                    if let b = c0.bid, b > 0 { return b }
+                    if let a = c0.ask, a > 0 { return a }
+                    return c0.last
+                }()
+                print("[DEBUG][YahooOptions] sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: mid))")
+            }
             #endif
             return (expirations, callStrikes.sorted(), putStrikes.sorted(), callContracts, putContracts)
         }

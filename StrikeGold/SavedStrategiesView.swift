@@ -104,6 +104,7 @@ struct SavedStrategiesView: View {
     }
 }
 
+@MainActor
 struct SavedStrategyDetailView: View {
     let saved: SavedStrategy
 

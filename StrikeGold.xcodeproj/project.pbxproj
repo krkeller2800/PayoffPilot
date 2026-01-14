@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		DF0F1DE32F128F8700AFCB71 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF136BA62F119EF400634146 /* Assets.xcassets */; };
+		DF0F1DE52F156EA500AFCB71 /* TradingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DE42F156EA500AFCB71 /* TradingService.swift */; };
+		DF0F1DE72F156EAA00AFCB71 /* PaperTradingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DE62F156EAA00AFCB71 /* PaperTradingService.swift */; };
+		DF0F1DE92F156EAF00AFCB71 /* PlaceOrderSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DE82F156EAF00AFCB71 /* PlaceOrderSheet.swift */; };
+		DF0F1DEB2F1597F800AFCB71 /* OrderHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DEA2F1597F800AFCB71 /* OrderHistory.swift */; };
+		DF0F1DED2F15980400AFCB71 /* OrderHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DEC2F15980400AFCB71 /* OrderHistoryView.swift */; };
 		DF136BB32F119F4900634146 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BA72F119EF400634146 /* ContentView.swift */; };
 		DF136BB42F119F4900634146 /* GradientAdButtonStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BA82F119EF400634146 /* GradientAdButtonStyle.swift */; };
 		DF136BB52F119F4900634146 /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BAA2F119EF400634146 /* KeychainHelper.swift */; };
@@ -20,6 +26,11 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		DF0F1DE42F156EA500AFCB71 /* TradingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradingService.swift; sourceTree = "<group>"; };
+		DF0F1DE62F156EAA00AFCB71 /* PaperTradingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperTradingService.swift; sourceTree = "<group>"; };
+		DF0F1DE82F156EAF00AFCB71 /* PlaceOrderSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceOrderSheet.swift; sourceTree = "<group>"; };
+		DF0F1DEA2F1597F800AFCB71 /* OrderHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderHistory.swift; sourceTree = "<group>"; };
+		DF0F1DEC2F15980400AFCB71 /* OrderHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderHistoryView.swift; sourceTree = "<group>"; };
 		DF136BA62F119EF400634146 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		DF136BA72F119EF400634146 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		DF136BA82F119EF400634146 /* GradientAdButtonStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GradientAdButtonStyle.swift; sourceTree = "<group>"; };
@@ -61,6 +72,11 @@
 				DF136BAF2F119EF400634146 /* SettingsView.swift */,
 				DF136BB02F119EF400634146 /* SettingsViewModel.swift */,
 				DF136BB12F119EF400634146 /* StrikeGoldApp.swift */,
+				DF0F1DE42F156EA500AFCB71 /* TradingService.swift */,
+				DF0F1DE62F156EAA00AFCB71 /* PaperTradingService.swift */,
+				DF0F1DE82F156EAF00AFCB71 /* PlaceOrderSheet.swift */,
+				DF0F1DEA2F1597F800AFCB71 /* OrderHistory.swift */,
+				DF0F1DEC2F15980400AFCB71 /* OrderHistoryView.swift */,
 			);
 			path = StrikeGold;
 			sourceTree = "<group>";
@@ -142,6 +158,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DF0F1DE32F128F8700AFCB71 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -154,14 +171,19 @@
 			files = (
 				DF136BBC2F119FC400634146 /* StrikeGoldApp.swift in Sources */,
 				DF136BB32F119F4900634146 /* ContentView.swift in Sources */,
+				DF0F1DE92F156EAF00AFCB71 /* PlaceOrderSheet.swift in Sources */,
 				DF136BB42F119F4900634146 /* GradientAdButtonStyle.swift in Sources */,
 				DF136BB52F119F4900634146 /* KeychainHelper.swift in Sources */,
 				DF136BB62F119F4900634146 /* OptionType.swift in Sources */,
 				DF136BB72F119F4900634146 /* QuoteService.swift in Sources */,
+				DF0F1DED2F15980400AFCB71 /* OrderHistoryView.swift in Sources */,
 				DF136BB82F119F4900634146 /* SavedModels.swift in Sources */,
+				DF0F1DE52F156EA500AFCB71 /* TradingService.swift in Sources */,
 				DF136BB92F119F4900634146 /* SavedStrategiesView.swift in Sources */,
 				DF136BBA2F119F4900634146 /* SettingsView.swift in Sources */,
+				DF0F1DE72F156EAA00AFCB71 /* PaperTradingService.swift in Sources */,
 				DF136BBB2F119F4900634146 /* SettingsViewModel.swift in Sources */,
+				DF0F1DEB2F1597F800AFCB71 /* OrderHistory.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
