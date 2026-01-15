@@ -247,12 +247,12 @@ struct ContentView: View {
             }
             .onAppear {
                 expirySpot = Double(underlyingNowText) ?? expirySpot
-                Task { await onLookup() }
+                Task { onLookup() }
                 rebuildProviderFromStorage()
             }
             .sheet(isPresented: $showSettings, onDismiss: {
                 rebuildProviderFromStorage()
-                Task { await onLookup() }
+                Task { onLookup() }
             }) {
                 SettingsView()
             }
@@ -1289,8 +1289,8 @@ struct ContentView: View {
         case .singlePut:
             if selectedPutContract == nil { missing.append("Select a put contract") }
         case .bullCallSpread:
-            // Not supported yet for placing; keep disabled by canPlaceOrder
-            break
+            if selectedCallContract == nil { missing.append("Select a long call contract") }
+            if selectedPutContract == nil { missing.append("Select a short call contract") }
         }
         // If anything is missing, present a helpful alert and return
         if !missing.isEmpty {
@@ -1300,8 +1300,132 @@ struct ContentView: View {
             DispatchQueue.main.async { self.showOrderResultAlert = true }
             return
         }
+        if strategy == .bullCallSpread {
+            Task { await placeBullCallSpreadOrders() }
+            return
+        }
         // All good — proceed
         Task { await prepareAndStartOrderFlow() }
+    }
+
+    private func placeBullCallSpreadOrders() async {
+        // Ensure we have an expiration to trade against (fallback to first available)
+        let expFallback = selectedExpiration ?? expirations.first
+        guard let exp = expFallback else {
+            orderResultText = "Please select an expiration before placing an order."
+            showOrderResultAlert = true
+            return
+        }
+        // If we used the fallback, persist it without triggering a refetch
+        if selectedExpiration == nil {
+            suppressExpirationRefetch = true
+            selectedExpiration = exp
+        }
+
+        guard let longCall = selectedCallContract, let shortCall = selectedPutContract else {
+            orderResultText = "Please select both long and short call contracts for the spread."
+            showOrderResultAlert = true
+            return
+        }
+
+        let symbol = symbolText.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+
+        // Determine sensible default limits for each leg
+        guard let longLimit = initialLimit(for: longCall, isBuy: true),
+              let shortLimit = initialLimit(for: shortCall, isBuy: false) else {
+            orderResultText = "Unable to determine a limit price for one or both legs (no market prices)."
+            showOrderResultAlert = true
+            return
+        }
+
+        let tifMapped: TIF = .day
+        let qty = max(1, contracts)
+
+        // Build requests
+        let longReq = OrderRequest(
+            symbol: symbol,
+            option: OptionSpec(expiration: exp, right: .call, strike: longCall.strike),
+            side: StrikeGold.Side.buy,
+            quantity: qty,
+            limit: longLimit,
+            tif: tifMapped
+        )
+
+        let shortReq = OrderRequest(
+            symbol: symbol,
+            option: OptionSpec(expiration: exp, right: .call, strike: shortCall.strike),
+            side: StrikeGold.Side.sell,
+            quantity: qty,
+            limit: shortLimit,
+            tif: tifMapped
+        )
+
+        let trader = PaperTradingService(quotes: appQuoteService)
+
+        do {
+            let longResult = try await trader.placeOptionOrder(longReq)
+            let shortResult = try await trader.placeOptionOrder(shortReq)
+
+            // Persist both legs to order history
+            let longSaved = SavedOrder(
+                id: longResult.placed.id,
+                placedAt: Date(),
+                symbol: symbol,
+                expiration: selectedExpiration,
+                right: "call",
+                strike: longCall.strike,
+                side: "buy",
+                quantity: qty,
+                limit: longLimit,
+                tif: "DAY",
+                status: (longResult.fill != nil) ? .filled : .working,
+                fillPrice: longResult.fill?.price,
+                fillQuantity: longResult.fill?.quantity,
+                note: nil
+            )
+            OrderStore.shared.append(longSaved)
+
+            let shortSaved = SavedOrder(
+                id: shortResult.placed.id,
+                placedAt: Date(),
+                symbol: symbol,
+                expiration: selectedExpiration,
+                right: "call",
+                strike: shortCall.strike,
+                side: "sell",
+                quantity: qty,
+                limit: shortLimit,
+                tif: "DAY",
+                status: (shortResult.fill != nil) ? .filled : .working,
+                fillPrice: shortResult.fill?.price,
+                fillQuantity: shortResult.fill?.quantity,
+                note: nil
+            )
+            OrderStore.shared.append(shortSaved)
+
+            // Build a combined user-facing message
+            let longMsg: String = {
+                if let fill = longResult.fill {
+                    return "Long Call (K=\(OptionsFormat.number(longCall.strike))) filled \(fill.quantity) @ \(OptionsFormat.money(fill.price)). ID: \(longResult.placed.id)"
+                } else {
+                    return "Long Call (K=\(OptionsFormat.number(longCall.strike))) working @ \(OptionsFormat.money(longLimit)). ID: \(longResult.placed.id)"
+                }
+            }()
+
+            let shortMsg: String = {
+                if let fill = shortResult.fill {
+                    return "Short Call (K=\(OptionsFormat.number(shortCall.strike))) filled \(fill.quantity) @ \(OptionsFormat.money(fill.price)). ID: \(shortResult.placed.id)"
+                } else {
+                    return "Short Call (K=\(OptionsFormat.number(shortCall.strike))) working @ \(OptionsFormat.money(shortLimit)). ID: \(shortResult.placed.id)"
+                }
+            }()
+
+            orderResultText = "Spread orders placed:\n\n\(longMsg)\n\n\(shortMsg)"
+        } catch {
+            orderResultText = "Spread order failed: \(error.localizedDescription)"
+        }
+
+        showOrderResultAlert = true
     }
 
     private func prepareAndStartOrderFlow() async {
@@ -1326,7 +1450,7 @@ struct ContentView: View {
 
     private func autoSelectDefaultContractIfNeeded() {
         // Auto-select near-the-money strikes and contracts ONLY if an expiration is selected
-        guard let selectedExp = selectedExpiration else { return }
+        guard selectedExpiration != nil else { return }
         let price = Double(underlyingNowText) ?? expirySpot
         switch strategy {
         case .singleCall:
@@ -1380,7 +1504,7 @@ struct ContentView: View {
         case .singlePut:
             return hasExpiration && selectedPutContract != nil
         case .bullCallSpread:
-            return false
+            return hasExpiration && selectedCallContract != nil && selectedPutContract != nil
         }
     }
 

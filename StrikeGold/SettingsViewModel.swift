@@ -34,7 +34,11 @@ final class SettingsViewModel: ObservableObject {
     @Published private(set) var statusMessage: String? = nil
 
     // Enabled service (nil until enabled).
-    @Published private(set) var quoteService: QuoteService? = nil
+    @Published private(set) var quoteService: QuoteService? = nil {
+        didSet {
+            Task { await OrderMonitor.shared.setQuoteService(quoteService) }
+        }
+    }
 
     init() {
         // Load any saved token on startup

@@ -12,6 +12,9 @@ struct StrikeGoldApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .onAppear {
+                    Task { await OrderMonitor.shared.start() }
+                }
         }
     }
 }

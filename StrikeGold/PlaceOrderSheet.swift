@@ -40,6 +40,12 @@ struct PlaceOrderSheet: View {
         return df
     }()
 
+    // Nonisolated number formatting for init-time use (avoid @MainActor calls)
+    nonisolated private static func formatLimit(_ value: Double) -> String {
+        // Use a simple, locale-agnostic formatting to avoid main-actor NumberFormatter
+        return String(format: "%.2f", value)
+    }
+
     init(
         contract: OptionContract,
         prefilledSide: OrderSide,
@@ -60,7 +66,7 @@ struct PlaceOrderSheet: View {
         self.preselectedExpiration = preselectedExpiration
 
         _quantity = State(initialValue: initialQuantity)
-        _limitText = State(initialValue: initialLimit.map(OptionsFormat.number) ?? "")
+        _limitText = State(initialValue: initialLimit.map(Self.formatLimit) ?? "")
         _side = State(initialValue: prefilledSide)
         _selectedExpiration = State(initialValue: preselectedExpiration)
     }
@@ -84,16 +90,25 @@ struct PlaceOrderSheet: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    Button {
-                        onCancel()
-                    } label: {
-                        Label("Edit in Chain", systemImage: "slider.horizontal.3")
-                    }
-                    .buttonStyle(.bordered)
+                    HStack(alignment: .top, spacing: 8) {
+                        // Left column: full-width button matching hint column width
+                        Button {
+                            onCancel()
+                        } label: {
+                            Label("Edit in Chain", systemImage: "slider.horizontal.3")
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.bordered)
+                        .frame(maxWidth: .infinity, alignment: .leading)
 
-                    Text("To change expiration or contract, edit in the Option Chain.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        // Right column: wrapping hint text
+                        Text("To change expiration or contract, edit in the Option Chain.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading)
+                            .lineLimit(nil)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
 
                 Section("Contract") {
@@ -111,21 +126,39 @@ struct PlaceOrderSheet: View {
                 Section("Order") {
                     Picker("Side", selection: $side) {
                         ForEach(OrderSide.allCases) { s in
-                            Label(s.displayName, systemImage: s.systemImage)
-                                .labelStyle(.titleAndIcon)
-                                .foregroundStyle(s.tint)
-                                .tag(s)
+                            Text(s.displayName).tag(s)
                         }
                     }
                     .pickerStyle(.segmented)
+                    .controlSize(.small)
 
-                    Stepper(value: $quantity, in: 1...50) {
-                        LabeledContent("Quantity") { Text("\(quantity)") }
+                    HStack(alignment: .center, spacing: 8) {
+                        // Left: Quantity label and current value
+                        HStack(spacing: 4) {
+                            Text("Contracts")
+                            Text("\(quantity)")
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                        // Middle: Quantity stepper
+                        Stepper(value: $quantity, in: 1...50) {
+                            EmptyView()
+                        }
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, alignment: .center)
+
+                        // Right: Limit (premium) text field
+                        HStack(spacing: 4) {
+                            Text("Limit")
+                            TextField("0.00", text: $limitText)
+                                .font(.footnote)
+                                .textFieldStyle(.roundedBorder)
+                                .keyboardType(.decimalPad)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                     }
-
-                    TextField("Limit Price", text: $limitText)
-                        .textFieldStyle(.roundedBorder)
-                        .keyboardType(.decimalPad)
 
                     Picker("Time in Force", selection: $tif) {
                         ForEach(TimeInForce.allCases) { t in
@@ -133,7 +166,9 @@ struct PlaceOrderSheet: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                    .controlSize(.small)
                 }
+                .font(.footnote)
 
                 Section("Notes (optional)") {
                     TextField("Add a note for this order", text: $note, axis: .vertical)
@@ -216,5 +251,30 @@ struct PlaceOrderSheet: View {
         if let p = price { return OptionsFormat.number(p) }
         return "—"
     }
+}
+
+#Preview("Place Order Sheet") {
+    // Build a real OptionContract using your actual initializer
+    let contract = OptionContract(kind: .call, strike: 185.0, bid: 2.35, ask: 2.55, last: 2.50)
+
+    let expirations: [Date] = [
+        Date(),
+        Calendar.current.date(byAdding: .day, value: 7, to: Date())!,
+        Calendar.current.date(byAdding: .day, value: 30, to: Date())!
+    ]
+
+    return PlaceOrderSheet(
+        contract: contract,
+        prefilledSide: .buy,
+        initialQuantity: 1,
+        initialLimit: 2.45,
+        expirations: expirations,
+        preselectedExpiration: expirations[2]
+    ) { limit, tif, qty, exp in
+        print("Confirm: limit=\(limit), tif=\(tif), qty=\(qty), exp=\(String(describing: exp))")
+    } onCancel: {
+        print("Canceled")
+    }
+    .presentationDetents([.medium, .large])
 }
 

@@ -26,7 +26,7 @@ final class PaperTradingService: TradingService {
         
         let bid = contract.bid
         let ask = contract.ask
-        let last = contract.last
+        _ = contract.last
         let mid = Self.computeMid(bid: bid, ask: ask)
         
         let limit = request.limit

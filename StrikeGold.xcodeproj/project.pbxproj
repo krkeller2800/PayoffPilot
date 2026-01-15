@@ -23,6 +23,7 @@
 		DF136BBA2F119F4900634146 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BAF2F119EF400634146 /* SettingsView.swift */; };
 		DF136BBB2F119F4900634146 /* SettingsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BB02F119EF400634146 /* SettingsViewModel.swift */; };
 		DF136BBC2F119FC400634146 /* StrikeGoldApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BB12F119EF400634146 /* StrikeGoldApp.swift */; };
+		DFD065B82F17F099008B2669 /* OrderMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFD065B72F17F099008B2669 /* OrderMonitor.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -44,6 +45,7 @@
 		DF136BB02F119EF400634146 /* SettingsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewModel.swift; sourceTree = "<group>"; };
 		DF136BB12F119EF400634146 /* StrikeGoldApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrikeGoldApp.swift; sourceTree = "<group>"; };
 		DF64F2FF2F0475FD00F1280B /* StrikeGold.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StrikeGold.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		DFD065B72F17F099008B2669 /* OrderMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderMonitor.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -77,6 +79,7 @@
 				DF0F1DE82F156EAF00AFCB71 /* PlaceOrderSheet.swift */,
 				DF0F1DEA2F1597F800AFCB71 /* OrderHistory.swift */,
 				DF0F1DEC2F15980400AFCB71 /* OrderHistoryView.swift */,
+				DFD065B72F17F099008B2669 /* OrderMonitor.swift */,
 			);
 			path = StrikeGold;
 			sourceTree = "<group>";
@@ -170,6 +173,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				DF136BBC2F119FC400634146 /* StrikeGoldApp.swift in Sources */,
+				DFD065B82F17F099008B2669 /* OrderMonitor.swift in Sources */,
 				DF136BB32F119F4900634146 /* ContentView.swift in Sources */,
 				DF0F1DE92F156EAF00AFCB71 /* PlaceOrderSheet.swift in Sources */,
 				DF136BB42F119F4900634146 /* GradientAdButtonStyle.swift in Sources */,
