@@ -20,7 +20,7 @@ final class PaperTradingService: TradingService {
             contracts = optionChain.putContracts
         }
         
-        guard let contract = contracts.first(where: { $0.strike == request.option.strike }) else {
+        guard let contract = contracts.first(where: { abs($0.strike - request.option.strike) < 0.0001 }) else {
             return OrderResult(placed: placed, fill: nil)
         }
         
@@ -53,26 +53,26 @@ final class PaperTradingService: TradingService {
         }
         
         if crosses {
-            let execPrice: Double
+            let rawExecPrice: Double
             switch side {
             case .buy:
                 if let ask = ask {
-                    execPrice = min(ask, limit)
+                    rawExecPrice = min(ask, limit)
                 } else if let mid = mid {
-                    execPrice = min(mid, limit)
+                    rawExecPrice = min(mid, limit)
                 } else {
-                    execPrice = limit
+                    rawExecPrice = limit
                 }
             case .sell:
                 if let bid = bid {
-                    execPrice = max(bid, limit)
+                    rawExecPrice = max(bid, limit)
                 } else if let mid = mid {
-                    execPrice = max(mid, limit)
+                    rawExecPrice = max(mid, limit)
                 } else {
-                    execPrice = limit
+                    rawExecPrice = limit
                 }
             }
-            
+            let execPrice = (rawExecPrice * 100).rounded() / 100
             let fill = OrderFill(price: execPrice, quantity: request.quantity, timestamp: Date())
             return OrderResult(placed: placed, fill: fill)
         } else {

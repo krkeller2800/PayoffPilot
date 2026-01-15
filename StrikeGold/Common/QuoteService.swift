@@ -65,9 +65,19 @@ struct TradierProvider: QuoteDataProvider {
     private let token: String
     private let environment: Environment
 
-    init(token: String, environment: Environment = .production) {
+    #if DEBUG
+    private var debugLogsEnabled: Bool = false
+    private func dlog(_ message: @autoclosure () -> String) {
+        if debugLogsEnabled { print(message()) }
+    }
+    #endif
+
+    init(token: String, environment: Environment = .production, debugLogsEnabled: Bool = false) {
         self.token = token
         self.environment = environment
+        #if DEBUG
+        self.debugLogsEnabled = debugLogsEnabled
+        #endif
     }
 
     private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
@@ -128,9 +138,10 @@ struct TradierProvider: QuoteDataProvider {
         #if DEBUG
         if let http = expResp as? HTTPURLResponse {
             let body = String(data: expData.prefix(400), encoding: .utf8) ?? "(binary)"
-            print("[DEBUG][Tradier] Expirations URL:", expReq.url?.absoluteString ?? "?")
-            print("[DEBUG][Tradier] Expirations status:", http.statusCode)
-            print("[DEBUG][Tradier] Expirations body prefix:\n", body)
+            let expURLString = expReq.url?.absoluteString ?? "?"
+                dlog("[DEBUG][Tradier] Expirations URL: \(expURLString)")
+            dlog("[DEBUG][Tradier] Expirations status: \(http.statusCode)")
+            dlog("[DEBUG][Tradier] Expirations body prefix:\n \(body)")
         }
         #endif
         if let http = expResp as? HTTPURLResponse {
@@ -165,9 +176,10 @@ struct TradierProvider: QuoteDataProvider {
             #if DEBUG
             if let http = chainResp as? HTTPURLResponse {
                 let body = String(data: chainData.prefix(400), encoding: .utf8) ?? "(binary)"
-                print("[DEBUG][Tradier] Chains URL:", chainReq.url?.absoluteString ?? "?")
-                print("[DEBUG][Tradier] Chains status:", http.statusCode)
-                print("[DEBUG][Tradier] Chains body prefix:\n", body)
+                let chainURLString = chainReq.url?.absoluteString ?? "?"
+                    dlog("[DEBUG][Tradier] Chains URL: \(chainURLString)")
+                dlog("[DEBUG][Tradier] Chains status: \(http.statusCode)")
+                dlog("[DEBUG][Tradier] Chains body prefix:\n \(body)")
             }
             #endif
             if let http = chainResp as? HTTPURLResponse {
@@ -197,8 +209,8 @@ struct TradierProvider: QuoteDataProvider {
         }
 
         #if DEBUG
-        print("[DEBUG][QuoteService] Provider chain -> expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced: \(callContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }.count + putContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }.count)")
-        if let ex = expirations.first { print("[DEBUG][QuoteService] Provider first expiration: \(ex)") }
+        dlog("[DEBUG][QuoteService] Provider chain -> expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced: \(callContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }.count + putContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }.count)")
+        if let ex = expirations.first { dlog("[DEBUG][QuoteService] Provider first expiration: \(ex)") }
         if let sample = callContracts.first {
             let mid: Double? = {
                 if let b = sample.bid, let a = sample.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
@@ -206,7 +218,7 @@ struct TradierProvider: QuoteDataProvider {
                 if let a = sample.ask, a > 0 { return a }
                 return sample.last
             }()
-            print("[DEBUG][QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: mid))")
+            dlog("[DEBUG][QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: mid))")
         }
         #endif
 
@@ -219,7 +231,9 @@ struct TradierProvider: QuoteDataProvider {
         let result = await validateTokenDetailed()
         #if DEBUG
         if !result.ok {
-            print("[VALIDATE][Tradier] status=\(result.statusCode.map(String.init) ?? "?") message=\(result.errorDescription ?? "-")")
+            let status = result.statusCode.map(String.init) ?? "?"
+            let message = result.errorDescription ?? "-"
+            dlog("[VALIDATE][Tradier] status=\(status) message=\(message)")
         }
         #endif
         return result.ok
@@ -263,6 +277,11 @@ struct TradierProvider: QuoteDataProvider {
 /// Finnhub-backed provider for quotes (BYO key). Option chains are not provided here; fall back to Yahoo.
 struct FinnhubProvider: QuoteDataProvider {
     private let token: String
+
+    #if DEBUG
+    private var debugLogsEnabled: Bool = true
+    private func dlog(_ message: @autoclosure () -> String) { if debugLogsEnabled { print(message()) } }
+    #endif
 
     init(token: String) {
         self.token = token
@@ -319,7 +338,9 @@ struct FinnhubProvider: QuoteDataProvider {
         let result = await validateTokenDetailed()
         #if DEBUG
         if !result.ok {
-            print("[VALIDATE][Finnhub] status=\(result.statusCode.map(String.init) ?? "?") message=\(result.errorDescription ?? "-")")
+            let status = result.statusCode.map(String.init) ?? "?"
+            let message = result.errorDescription ?? "-"
+            dlog("[VALIDATE][Finnhub] status=\(status) message=\(message)")
         }
         #endif
         return result.ok
@@ -363,6 +384,11 @@ struct FinnhubProvider: QuoteDataProvider {
 /// Polygon-backed provider for quotes (BYO key). Option chains are not provided here; fall back to Yahoo.
 struct PolygonProvider: QuoteDataProvider {
     private let token: String
+
+    #if DEBUG
+    private var debugLogsEnabled: Bool = true
+    private func dlog(_ message: @autoclosure () -> String) { if debugLogsEnabled { print(message()) } }
+    #endif
 
     init(token: String) {
         self.token = token
@@ -445,7 +471,9 @@ struct PolygonProvider: QuoteDataProvider {
         let result = await validateTokenDetailed()
         #if DEBUG
         if !result.ok {
-            print("[VALIDATE][Polygon] status=\(result.statusCode.map(String.init) ?? "?") message=\(result.errorDescription ?? "-")")
+            let status = result.statusCode.map(String.init) ?? "?"
+            let message = result.errorDescription ?? "-"
+            dlog("[VALIDATE][Polygon] status=\(status) message=\(message)")
         }
         #endif
         return result.ok
@@ -488,6 +516,11 @@ struct PolygonProvider: QuoteDataProvider {
 /// TradeStation-backed provider for quotes (BYO key). Option chains fall back to Yahoo for now.
 struct TradeStationProvider: QuoteDataProvider {
     private let token: String
+
+    #if DEBUG
+    private var debugLogsEnabled: Bool = true
+    private func dlog(_ message: @autoclosure () -> String) { if debugLogsEnabled { print(message()) } }
+    #endif
 
     init(token: String) {
         self.token = token
@@ -547,7 +580,9 @@ struct TradeStationProvider: QuoteDataProvider {
         let result = await validateTokenDetailed()
         #if DEBUG
         if !result.ok {
-            print("[VALIDATE][TradeStation] status=\(result.statusCode.map(String.init) ?? "?") message=\(result.errorDescription ?? "-")")
+            let status = result.statusCode.map(String.init) ?? "?"
+            let message = result.errorDescription ?? "-"
+            dlog("[VALIDATE][TradeStation] status=\(status) message=\(message)")
         }
         #endif
         return result.ok
@@ -589,8 +624,30 @@ struct TradeStationProvider: QuoteDataProvider {
 actor QuoteService {
     private let provider: QuoteDataProvider?
 
+    #if DEBUG
+    private var debugLogsEnabled: Bool = false
+    func setDebugLogging(_ enabled: Bool) { debugLogsEnabled = enabled }
+    private func dlog(_ message: @autoclosure () -> String) {
+        if debugLogsEnabled { print(message()) }
+    }
+    #endif
+
+    #if DEBUG
+    nonisolated private static func _debugLog(_ message: @autoclosure () -> String) {
+        // Static, nonisolated logger for use during initialization when `self` is not available.
+        print(message())
+    }
+    #endif
+
     init(provider: QuoteDataProvider? = nil) {
         self.provider = provider
+        #if DEBUG
+        let providerDesc: String = {
+            if let p = provider { return String(describing: type(of: p)) }
+            return "nil"
+        }()
+        QuoteService._debugLog("[QuoteService] init with provider: \(providerDesc)")
+        #endif
     }
 
     enum QuoteError: Error, LocalizedError {
@@ -756,9 +813,9 @@ actor QuoteService {
 
         #if DEBUG
         if provider == nil {
-            print("[DEBUG][QuoteService] No custom provider. Falling back to Yahoo for options.")
+            dlog("[QuoteService] No custom provider. Falling back to Yahoo for options.")
         } else {
-            print("[DEBUG][QuoteService] Using custom provider for options.")
+            dlog("[QuoteService] Using custom provider for options.")
         }
         #endif
 
@@ -772,8 +829,8 @@ actor QuoteService {
                 let pricedProvider: [OptionContract] = combinedContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
 
                 #if DEBUG
-                print("[DEBUG][QuoteService] Provider chain -> expirations: \(data.expirations.count), calls: \(data.callContracts.count), puts: \(data.putContracts.count), priced: \(pricedProvider.count)")
-                if let ex = data.expirations.first { print("[DEBUG][QuoteService] Provider first expiration: \(ex)") }
+                dlog("[QuoteService] Provider chain -> expirations: \(data.expirations.count), calls: \(data.callContracts.count), puts: \(data.putContracts.count), priced: \(pricedProvider.count)")
+                dlog("[QuoteService] Provider first expiration: \(String(describing: data.expirations.first))")
                 if let sample = data.callContracts.first {
                     let mid: Double? = {
                         if let b = sample.bid, let a = sample.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
@@ -781,7 +838,7 @@ actor QuoteService {
                         if let a = sample.ask, a > 0 { return a }
                         return sample.last
                     }()
-                    print("[DEBUG][QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: mid))")
+                    dlog("[QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: mid))")
                 }
                 #endif
                 // If provider returned contracts with any pricing, use it; otherwise fall back to Yahoo
@@ -829,8 +886,8 @@ actor QuoteService {
             #if DEBUG
             let pricedCalls = callContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
             let pricedPuts  = putContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
-            print("[DEBUG][YahooOptions] expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced calls: \(pricedCalls.count), priced puts: \(pricedPuts.count)")
-            if let firstExp = expirations.first { print("[DEBUG][YahooOptions] first expiration: \(firstExp)") }
+            dlog("[YahooOptions] expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced calls: \(pricedCalls.count), priced puts: \(pricedPuts.count)")
+            dlog("[YahooOptions] first expiration: \(String(describing: expirations.first))")
             if let c0 = callContracts.first {
                 let mid: Double? = {
                     if let b = c0.bid, let a = c0.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
@@ -838,7 +895,7 @@ actor QuoteService {
                     if let a = c0.ask, a > 0 { return a }
                     return c0.last
                 }()
-                print("[DEBUG][YahooOptions] sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: mid))")
+                dlog("[YahooOptions] sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: mid))")
             }
             #endif
             return (expirations, callStrikes.sorted(), putStrikes.sorted(), callContracts, putContracts)
@@ -1078,4 +1135,5 @@ private nonisolated struct TradierOption: Decodable {
     let ask: Double?
     let last: Double?
 }
+
 

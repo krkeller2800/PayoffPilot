@@ -33,6 +33,13 @@ struct PlaceOrderSheet: View {
     @State private var note: String = ""
     @State private var selectedExpiration: Date?
 
+#if DEBUG
+    @State private var debugLogsEnabled: Bool = false
+    private func dlog(_ message: @autoclosure () -> String) {
+        if debugLogsEnabled { print(message()) }
+    }
+#endif
+
     private static let dateFormatter: DateFormatter = {
         let df = DateFormatter()
         df.timeZone = TimeZone(identifier: "America/New_York")
@@ -189,6 +196,14 @@ struct PlaceOrderSheet: View {
                     .disabled(Double(limitText) == nil)
                     .tint(side.tint)
                 }
+#if DEBUG
+                ToolbarItem(placement: .topBarTrailing) {
+                    Toggle(isOn: $debugLogsEnabled) {
+                        Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug")
+                    }
+                    .toggleStyle(.switch)
+                }
+#endif
             }
         }
     }

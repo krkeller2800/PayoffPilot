@@ -40,6 +40,13 @@ struct SettingsView: View {
     @AppStorage("tradierTokenPersisted")
     private var tradierTokenPersisted: Bool = false
 
+    #if DEBUG
+    @State private var debugLogsEnabled: Bool = false
+    private func dlog(_ message: @autoclosure () -> String) {
+        if debugLogsEnabled { print(message()) }
+    }
+    #endif
+
     // Bindings that bridge @AppStorage <-> ViewModel enums
     private var selectedProviderBinding: Binding<SettingsViewModel.BYOProvider> {
         Binding(
@@ -333,6 +340,14 @@ struct SettingsView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                 }
+#if DEBUG
+                ToolbarItem(placement: .topBarLeading) {
+                    Toggle(isOn: $debugLogsEnabled) {
+                        Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug")
+                    }
+                    .toggleStyle(.switch)
+                }
+#endif
             }
             .onAppear {
                 // Ensure initial VM state matches persisted values

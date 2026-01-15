@@ -7,26 +7,42 @@ struct SavedOrder: Identifiable, Codable, Hashable {
         case failed
         case canceled
     }
+    
+    enum Right: String, Codable, Hashable, CaseIterable {
+        case call = "call"
+        case put = "put"
+    }
+    
+    enum Side: String, Codable, Hashable, CaseIterable {
+        case buy = "buy"
+        case sell = "sell"
+    }
+    
+    enum TIF: String, Codable, Hashable, CaseIterable {
+        case day = "DAY"
+        case gtc = "GTC"
+    }
 
     var id: String
     var placedAt: Date
     var symbol: String
     var expiration: Date?
-    var right: String // "call" or "put"
+    var right: Right
     var strike: Double
-    var side: String // "buy" or "sell"
+    var side: Side
     var quantity: Int
     var limit: Double?
-    var tif: String // "DAY" or "GTC"
+    var tif: TIF
     var status: Status
     var fillPrice: Double?
     var fillQuantity: Int?
     var note: String?
 }
 
-final class OrderStore {
+actor OrderStore {
     static let shared = OrderStore()
     private let key = "saved_orders_v1"
+    static let didChange = Notification.Name("OrderStore.orderStoreDidChange")
 
     func load() -> [SavedOrder] {
         guard let data = UserDefaults.standard.data(forKey: key) else { return [] }
@@ -47,6 +63,9 @@ final class OrderStore {
             all.append(order)
         }
         save(all)
+        Task { @MainActor in
+            NotificationCenter.default.post(name: OrderStore.didChange, object: nil)
+        }
     }
 
     func update(id: String, mutate: (inout SavedOrder) -> Void) {
@@ -54,6 +73,9 @@ final class OrderStore {
         if let idx = all.firstIndex(where: { $0.id == id }) {
             mutate(&all[idx])
             save(all)
+            Task { @MainActor in
+                NotificationCenter.default.post(name: OrderStore.didChange, object: nil)
+            }
         }
     }
 
@@ -61,9 +83,15 @@ final class OrderStore {
         var all = load()
         all.removeAll { $0.id == id }
         save(all)
+        Task { @MainActor in
+            NotificationCenter.default.post(name: OrderStore.didChange, object: nil)
+        }
     }
 
     func clear() {
         save([])
+        Task { @MainActor in
+            NotificationCenter.default.post(name: OrderStore.didChange, object: nil)
+        }
     }
 }

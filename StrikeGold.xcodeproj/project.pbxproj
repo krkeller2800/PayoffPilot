@@ -6,47 +6,55 @@
 	objectVersion = 77;
 	objects = {
 
-/* Begin PBXBuildFile section */
-		DF0F1DE32F128F8700AFCB71 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = DF136BA62F119EF400634146 /* Assets.xcassets */; };
-		DF0F1DE52F156EA500AFCB71 /* TradingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DE42F156EA500AFCB71 /* TradingService.swift */; };
-		DF0F1DE72F156EAA00AFCB71 /* PaperTradingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DE62F156EAA00AFCB71 /* PaperTradingService.swift */; };
-		DF0F1DE92F156EAF00AFCB71 /* PlaceOrderSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DE82F156EAF00AFCB71 /* PlaceOrderSheet.swift */; };
-		DF0F1DEB2F1597F800AFCB71 /* OrderHistory.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DEA2F1597F800AFCB71 /* OrderHistory.swift */; };
-		DF0F1DED2F15980400AFCB71 /* OrderHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF0F1DEC2F15980400AFCB71 /* OrderHistoryView.swift */; };
-		DF136BB32F119F4900634146 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BA72F119EF400634146 /* ContentView.swift */; };
-		DF136BB42F119F4900634146 /* GradientAdButtonStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BA82F119EF400634146 /* GradientAdButtonStyle.swift */; };
-		DF136BB52F119F4900634146 /* KeychainHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BAA2F119EF400634146 /* KeychainHelper.swift */; };
-		DF136BB62F119F4900634146 /* OptionType.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BAB2F119EF400634146 /* OptionType.swift */; };
-		DF136BB72F119F4900634146 /* QuoteService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BAC2F119EF400634146 /* QuoteService.swift */; };
-		DF136BB82F119F4900634146 /* SavedModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BAD2F119EF400634146 /* SavedModels.swift */; };
-		DF136BB92F119F4900634146 /* SavedStrategiesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BAE2F119EF400634146 /* SavedStrategiesView.swift */; };
-		DF136BBA2F119F4900634146 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BAF2F119EF400634146 /* SettingsView.swift */; };
-		DF136BBB2F119F4900634146 /* SettingsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BB02F119EF400634146 /* SettingsViewModel.swift */; };
-		DF136BBC2F119FC400634146 /* StrikeGoldApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = DF136BB12F119EF400634146 /* StrikeGoldApp.swift */; };
-		DFD065B82F17F099008B2669 /* OrderMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = DFD065B72F17F099008B2669 /* OrderMonitor.swift */; };
-/* End PBXBuildFile section */
-
 /* Begin PBXFileReference section */
-		DF0F1DE42F156EA500AFCB71 /* TradingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TradingService.swift; sourceTree = "<group>"; };
-		DF0F1DE62F156EAA00AFCB71 /* PaperTradingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PaperTradingService.swift; sourceTree = "<group>"; };
-		DF0F1DE82F156EAF00AFCB71 /* PlaceOrderSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceOrderSheet.swift; sourceTree = "<group>"; };
-		DF0F1DEA2F1597F800AFCB71 /* OrderHistory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderHistory.swift; sourceTree = "<group>"; };
-		DF0F1DEC2F15980400AFCB71 /* OrderHistoryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderHistoryView.swift; sourceTree = "<group>"; };
-		DF136BA62F119EF400634146 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
-		DF136BA72F119EF400634146 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
-		DF136BA82F119EF400634146 /* GradientAdButtonStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GradientAdButtonStyle.swift; sourceTree = "<group>"; };
-		DF136BA92F119EF400634146 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		DF136BAA2F119EF400634146 /* KeychainHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainHelper.swift; sourceTree = "<group>"; };
-		DF136BAB2F119EF400634146 /* OptionType.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OptionType.swift; sourceTree = "<group>"; };
-		DF136BAC2F119EF400634146 /* QuoteService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuoteService.swift; sourceTree = "<group>"; };
-		DF136BAD2F119EF400634146 /* SavedModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedModels.swift; sourceTree = "<group>"; };
-		DF136BAE2F119EF400634146 /* SavedStrategiesView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SavedStrategiesView.swift; sourceTree = "<group>"; };
-		DF136BAF2F119EF400634146 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
-		DF136BB02F119EF400634146 /* SettingsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsViewModel.swift; sourceTree = "<group>"; };
-		DF136BB12F119EF400634146 /* StrikeGoldApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StrikeGoldApp.swift; sourceTree = "<group>"; };
 		DF64F2FF2F0475FD00F1280B /* StrikeGold.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = StrikeGold.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		DFD065B72F17F099008B2669 /* OrderMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OrderMonitor.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		DFD065BF2F193720008B2669 /* Exceptions for "App" folder in "StrikeGold" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = DF64F2FE2F0475FD00F1280B /* StrikeGold */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		DFD065B92F1935C3008B2669 /* Oder */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Oder;
+			sourceTree = "<group>";
+		};
+		DFD065BA2F19360C008B2669 /* Trading */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Trading;
+			sourceTree = "<group>";
+		};
+		DFD065BB2F193646008B2669 /* Common */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Common;
+			sourceTree = "<group>";
+		};
+		DFD065BC2F193695008B2669 /* Strategy */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Strategy;
+			sourceTree = "<group>";
+		};
+		DFD065BD2F1936B7008B2669 /* Settings */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Settings;
+			sourceTree = "<group>";
+		};
+		DFD065BE2F1936FE008B2669 /* App */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				DFD065BF2F193720008B2669 /* Exceptions for "App" folder in "StrikeGold" target */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		DF64F2FC2F0475FD00F1280B /* Frameworks */ = {
@@ -62,24 +70,12 @@
 		DF136BB22F119EF400634146 /* StrikeGold */ = {
 			isa = PBXGroup;
 			children = (
-				DF136BA62F119EF400634146 /* Assets.xcassets */,
-				DF136BA72F119EF400634146 /* ContentView.swift */,
-				DF136BA82F119EF400634146 /* GradientAdButtonStyle.swift */,
-				DF136BA92F119EF400634146 /* Info.plist */,
-				DF136BAA2F119EF400634146 /* KeychainHelper.swift */,
-				DF136BAB2F119EF400634146 /* OptionType.swift */,
-				DF136BAC2F119EF400634146 /* QuoteService.swift */,
-				DF136BAD2F119EF400634146 /* SavedModels.swift */,
-				DF136BAE2F119EF400634146 /* SavedStrategiesView.swift */,
-				DF136BAF2F119EF400634146 /* SettingsView.swift */,
-				DF136BB02F119EF400634146 /* SettingsViewModel.swift */,
-				DF136BB12F119EF400634146 /* StrikeGoldApp.swift */,
-				DF0F1DE42F156EA500AFCB71 /* TradingService.swift */,
-				DF0F1DE62F156EAA00AFCB71 /* PaperTradingService.swift */,
-				DF0F1DE82F156EAF00AFCB71 /* PlaceOrderSheet.swift */,
-				DF0F1DEA2F1597F800AFCB71 /* OrderHistory.swift */,
-				DF0F1DEC2F15980400AFCB71 /* OrderHistoryView.swift */,
-				DFD065B72F17F099008B2669 /* OrderMonitor.swift */,
+				DFD065BE2F1936FE008B2669 /* App */,
+				DFD065BB2F193646008B2669 /* Common */,
+				DFD065BC2F193695008B2669 /* Strategy */,
+				DFD065BD2F1936B7008B2669 /* Settings */,
+				DFD065BA2F19360C008B2669 /* Trading */,
+				DFD065B92F1935C3008B2669 /* Oder */,
 			);
 			path = StrikeGold;
 			sourceTree = "<group>";
@@ -114,6 +110,14 @@
 			buildRules = (
 			);
 			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				DFD065B92F1935C3008B2669 /* Oder */,
+				DFD065BA2F19360C008B2669 /* Trading */,
+				DFD065BB2F193646008B2669 /* Common */,
+				DFD065BC2F193695008B2669 /* Strategy */,
+				DFD065BD2F1936B7008B2669 /* Settings */,
+				DFD065BE2F1936FE008B2669 /* App */,
 			);
 			name = StrikeGold;
 			packageProductDependencies = (
@@ -161,7 +165,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				DF0F1DE32F128F8700AFCB71 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -172,22 +175,6 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				DF136BBC2F119FC400634146 /* StrikeGoldApp.swift in Sources */,
-				DFD065B82F17F099008B2669 /* OrderMonitor.swift in Sources */,
-				DF136BB32F119F4900634146 /* ContentView.swift in Sources */,
-				DF0F1DE92F156EAF00AFCB71 /* PlaceOrderSheet.swift in Sources */,
-				DF136BB42F119F4900634146 /* GradientAdButtonStyle.swift in Sources */,
-				DF136BB52F119F4900634146 /* KeychainHelper.swift in Sources */,
-				DF136BB62F119F4900634146 /* OptionType.swift in Sources */,
-				DF136BB72F119F4900634146 /* QuoteService.swift in Sources */,
-				DF0F1DED2F15980400AFCB71 /* OrderHistoryView.swift in Sources */,
-				DF136BB82F119F4900634146 /* SavedModels.swift in Sources */,
-				DF0F1DE52F156EA500AFCB71 /* TradingService.swift in Sources */,
-				DF136BB92F119F4900634146 /* SavedStrategiesView.swift in Sources */,
-				DF136BBA2F119F4900634146 /* SettingsView.swift in Sources */,
-				DF0F1DE72F156EAA00AFCB71 /* PaperTradingService.swift in Sources */,
-				DF136BBB2F119F4900634146 /* SettingsViewModel.swift in Sources */,
-				DF0F1DEB2F1597F800AFCB71 /* OrderHistory.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

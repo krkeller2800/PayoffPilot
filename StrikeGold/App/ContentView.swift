@@ -13,6 +13,13 @@ import Foundation
 
 @MainActor
 struct ContentView: View {
+    #if DEBUG
+    @State private var debugLogsEnabled: Bool = false
+    private func dlog(_ message: @autoclosure () -> String) {
+        if debugLogsEnabled { print(message()) }
+    }
+    #endif
+
     // MARK: - Saving Models
     struct SavedStrategy: Identifiable, Codable, Hashable {
         enum Kind: String, Codable {
@@ -94,16 +101,16 @@ struct ContentView: View {
     @State private var putStrikes: [Double] = []
     @State private var selectedCallStrike: Double?
     @State private var selectedPutStrike: Double?
-    
+
     @State private var selectedCallContract: OptionContract? = nil
     @State private var selectedPutContract: OptionContract? = nil
-    
+
     @State private var cachedCallContracts: [OptionContract] = []
     @State private var cachedPutContracts: [OptionContract] = []
-    
+
     @State private var callMenuStrikeWidth: Int = 0
     @State private var putMenuStrikeWidth: Int = 0
-    
+
     @State private var useMarketPremium: Bool = true
 
     @State private var lastRefresh: Date?
@@ -169,7 +176,7 @@ struct ContentView: View {
                 Text(orderResultText)
             }
     }
-    
+
     @ViewBuilder private var mainContent: some View {
         AnyView(MainContentRoot(
             inputsCard: { AnyView(self.inputsCard) },
@@ -190,10 +197,11 @@ struct ContentView: View {
             rebuildProviderFromStorage: rebuildProviderFromStorage,
             quotesFooterText: quotesFooterText,
             onPlaceOrder: { self.startOrderFlow() },
-            canPlaceOrder: self.canPlaceOrder
+            canPlaceOrder: self.canPlaceOrder,
+            debugLogsEnabled: $debugLogsEnabled
         ))
     }
-    
+
     private struct MainContentRoot: View {
         let inputsCard: () -> AnyView
         let educationCard: () -> AnyView
@@ -219,6 +227,10 @@ struct ContentView: View {
         let onPlaceOrder: () -> Void
         let canPlaceOrder: Bool
 
+        #if DEBUG
+        @Binding var debugLogsEnabled: Bool
+        #endif
+
         var body: some View {
             NavigationStack {
                 ScrollView {
@@ -241,7 +253,13 @@ struct ContentView: View {
                         }
                     }
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                        HStack(spacing: 12) {
+                            Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                            #if DEBUG
+                            Toggle(isOn: $debugLogsEnabled) { Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug") }
+                                .toggleStyle(.switch)
+                            #endif
+                        }
                     }
                 }
             }
@@ -544,7 +562,7 @@ struct ContentView: View {
                         Label("What-If: Market Price at Expiration", systemImage: "slider.horizontal.3")
                             .lineLimit(1)
                             .truncationMode(.tail)
-                            .minimumScaleFactor(0.8) 
+                            .minimumScaleFactor(0.8)
                     }
                     .buttonStyle(.bordered)
                 }
@@ -568,7 +586,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Option Chain" + (isDelayedBadgeVisible ? " (delayed)" : ""))
                 .font(.subheadline)
-            
+
             if strategy == .bullCallSpread {
                 ViewThatFits(in: .horizontal) {
                     // Horizontal layout: Expiration + Long + Short
@@ -631,7 +649,7 @@ struct ContentView: View {
                         .onChange(of: selectedCallContract) { _, new in
                             #if DEBUG
                             if let c = new {
-                                print("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                dlog("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
                             }
                             #endif
                             if let c = new {
@@ -690,7 +708,7 @@ struct ContentView: View {
                         .onChange(of: selectedPutContract) { _, new in
                             #if DEBUG
                             if let c = new {
-                                print("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                dlog("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
                             }
                             #endif
                             if let c = new {
@@ -771,7 +789,7 @@ struct ContentView: View {
                         .onChange(of: selectedCallContract) { _, new in
                             #if DEBUG
                             if let c = new {
-                                print("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                dlog("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
                             }
                             #endif
                             if let c = new {
@@ -830,7 +848,7 @@ struct ContentView: View {
                         .onChange(of: selectedPutContract) { _, new in
                             #if DEBUG
                             if let c = new {
-                                print("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                dlog("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
                             }
                             #endif
                             if let c = new {
@@ -972,7 +990,7 @@ struct ContentView: View {
                         .onChange(of: selectedPutContract) { _, new in
                             #if DEBUG
                             if let c = new {
-                                print("[DEBUG][ContentView] Selected Put -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+                                dlog("[DEBUG][ContentView] Selected Put -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
                             }
                             #endif
                             if let c = new {
@@ -984,7 +1002,7 @@ struct ContentView: View {
                     }
                 }
             }
-            
+
             Toggle(isOn: $useMarketPremium) {
                 Text("Use market mid for premium")
             }
@@ -993,7 +1011,7 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
         }
     }
-    
+
     @ViewBuilder private var whatIfSheetContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
@@ -1157,12 +1175,12 @@ struct ContentView: View {
                 let xUpper = max(underlyingNow * 1.25, underlyingNow + 1)
                 let xDomain: ClosedRange<Double> = xLower...xUpper
 
-                let beValue = metrics.breakeven
-                let _: Bool = {
-                    guard let be = beValue else { return false }
-                    let range = xUpper - xLower
-                    return range > 0 ? abs(be - expirySpot) <= range * 0.05 : false
-                }()
+//                let beValue = metrics.breakeven
+//                let _: Bool = {
+//                    guard let be = beValue else { return false }
+//                    let range = xUpper - xLower
+//                    return range > 0 ? abs(be - expirySpot) <= range * 0.05 : false
+//                }()
 
                 Chart {
                     // Filter curve points to the slider's X-domain so the line doesn't extend beyond chart bounds
@@ -1205,7 +1223,7 @@ struct ContentView: View {
                                     .offset(y: 12)
                             }
                     }
-                    
+
                     // What-If marker: show P/L at the slider's underlying price
                     PointMark(
                         x: .value("Underlying", expirySpot),
@@ -1222,7 +1240,7 @@ struct ContentView: View {
 
                     // Legend series entries (minimal line segments off-plot to populate legend)
                     // Removed as per instruction
-                    
+
                 }
                 .chartYAxisLabel(position: .leading) { Text("P/L ($)") }
                 .chartXAxisLabel(position: .bottom) { Text("Underlying Price ($)").padding(.top, 6) }
@@ -1372,36 +1390,36 @@ struct ContentView: View {
                 placedAt: Date(),
                 symbol: symbol,
                 expiration: selectedExpiration,
-                right: "call",
+                right: SavedOrder.Right.call,
                 strike: longCall.strike,
-                side: "buy",
+                side: SavedOrder.Side.buy,
                 quantity: qty,
                 limit: longLimit,
-                tif: "DAY",
+                tif: SavedOrder.TIF.day,
                 status: (longResult.fill != nil) ? .filled : .working,
                 fillPrice: longResult.fill?.price,
                 fillQuantity: longResult.fill?.quantity,
                 note: nil
             )
-            OrderStore.shared.append(longSaved)
+            await OrderStore.shared.append(longSaved)
 
             let shortSaved = SavedOrder(
                 id: shortResult.placed.id,
                 placedAt: Date(),
                 symbol: symbol,
                 expiration: selectedExpiration,
-                right: "call",
+                right: SavedOrder.Right.call,
                 strike: shortCall.strike,
-                side: "sell",
+                side: SavedOrder.Side.sell,
                 quantity: qty,
                 limit: shortLimit,
-                tif: "DAY",
+                tif: SavedOrder.TIF.day,
                 status: (shortResult.fill != nil) ? .filled : .working,
                 fillPrice: shortResult.fill?.price,
                 fillQuantity: shortResult.fill?.quantity,
                 note: nil
             )
-            OrderStore.shared.append(shortSaved)
+            await OrderStore.shared.append(shortSaved)
 
             // Build a combined user-facing message
             let longMsg: String = {
@@ -1526,7 +1544,7 @@ struct ContentView: View {
     // Minimal implementation to satisfy compile-time references without external dependencies.
     private func rebuildProviderFromStorage() {
         #if DEBUG
-        print("[DEBUG][ContentView] Rebuilding provider from storage…")
+        dlog("[DEBUG][ContentView] Rebuilding provider from storage…")
         #endif
         isUsingCustomProvider = false
         if let provider = SettingsViewModel.BYOProvider(rawValue: lastEnabledProviderRaw) {
@@ -1558,7 +1576,7 @@ struct ContentView: View {
             appQuoteService = QuoteService()
         }
         #if DEBUG
-        print("[DEBUG][ContentView] Provider:", isUsingCustomProvider ? "Custom" : "Yahoo fallback")
+        dlog("[DEBUG][ContentView] Provider: \(isUsingCustomProvider ? "Custom" : "Yahoo fallback")")
         #endif
     }
 
@@ -1620,7 +1638,7 @@ struct ContentView: View {
         }
         return Formatter.shared.string(from: marketNoonEastern)
     }
-    
+
     private func nearestStrike(to price: Double, in strikes: [Double]) -> Double? {
         guard !strikes.isEmpty else { return nil }
         return strikes.min(by: { abs($0 - price) < abs($1 - price) })
@@ -1647,11 +1665,11 @@ struct ContentView: View {
         selectedCallContract = nil
         selectedPutContract = nil
     }
-    
+
     private func appContractsFor(kind: OptionContract.Kind) -> [OptionContract] {
         return (kind == .call) ? cachedCallContracts : cachedPutContracts
     }
-    
+
     private func contractLabel(_ c: OptionContract) -> String {
         let k = OptionsFormat.number(c.strike)
         if let b = c.bid, let a = c.ask, b > 0, a > 0 {
@@ -1663,7 +1681,7 @@ struct ContentView: View {
             return k
         }
     }
-    
+
     private func padRight(_ s: String, to width: Int) -> String {
         let n = s.count
         if n >= width { return s }
@@ -1689,7 +1707,7 @@ struct ContentView: View {
         let paddedStrike = padRight(strike, to: targetWidth)
         return "\(paddedStrike)\(displayed)"
     }
-    
+
     private func filteredLongCallContracts() -> [OptionContract] {
         let all = appContractsFor(kind: .call)
         guard let upper = selectedPutStrike else { return all }
@@ -1734,22 +1752,22 @@ struct ContentView: View {
             let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: selectedExpiration)
             await MainActor.run {
                 expirations = filterExpirationsForProviderTZ(chain.expirations)
-                
+
                 #if DEBUG
                 let rawCount = chain.expirations.count
                 let filteredCount = filterExpirationsForProviderTZ(chain.expirations).count
-                print("[DEBUG][ContentView] Expirations raw=\(rawCount), filtered(Eastern today+)=\(filteredCount)")
+                dlog("[DEBUG][ContentView] Expirations raw=\(rawCount), filtered(Eastern today+)=\(filteredCount)")
                 if let firstRaw = chain.expirations.first {
-                    print("[DEBUG][ContentView] First raw expiration:", firstRaw.formatted(date: .abbreviated, time: .omitted))
+                    dlog("[DEBUG][ContentView] First raw expiration: \(firstRaw.formatted(date: .abbreviated, time: .omitted))")
                 }
                 if let firstFiltered = expirations.first {
-                    print("[DEBUG][ContentView] First filtered expiration:", firstFiltered.formatted(date: .abbreviated, time: .omitted))
+                    dlog("[DEBUG][ContentView] First filtered expiration: \(firstFiltered.formatted(date: .abbreviated, time: .omitted))")
                 }
                 #endif
                 if expirations.isEmpty && fetchError == nil {
                     fetchError = "Option chain unavailable (no expirations)."
                 }
-                
+
                 callStrikes = chain.callStrikes
                 putStrikes = chain.putStrikes
                 cachedCallContracts = chain.callContracts
@@ -1757,19 +1775,19 @@ struct ContentView: View {
 
                 callMenuStrikeWidth = cachedCallContracts.map { OptionsFormat.number($0.strike).count }.max() ?? 0
                 putMenuStrikeWidth  = cachedPutContracts.map  { OptionsFormat.number($0.strike).count }.max() ?? 0
-                
+
                 #if DEBUG
                 let pricedCalls = cachedCallContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
                 let pricedPuts  = cachedPutContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
-                print("[DEBUG][ContentView] Cached contracts -> calls: \(cachedCallContracts.count) (priced: \(pricedCalls.count)), puts: \(cachedPutContracts.count) (priced: \(pricedPuts.count))")
+                dlog("[DEBUG][ContentView] Cached contracts -> calls: \(cachedCallContracts.count) (priced: \(pricedCalls.count)), puts: \(cachedPutContracts.count) (priced: \(pricedPuts.count))")
                 if let c0 = cachedCallContracts.first {
-                    print("[DEBUG][ContentView] Sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))")
+                    dlog("[DEBUG][ContentView] Sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))")
                 }
                 if let p0 = cachedPutContracts.first {
-                    print("[DEBUG][ContentView] Sample put: strike=\(p0.strike) bid=\(String(describing: p0.bid)) ask=\(String(describing: p0.ask)) last=\(String(describing: p0.last)) mid=\(String(describing: p0.mid))")
+                    dlog("[DEBUG][ContentView] Sample put: strike=\(p0.strike) bid=\(String(describing: p0.bid)) ask=\(String(describing: p0.ask)) last=\(String(describing: p0.last)) mid=\(String(describing: p0.mid))")
                 }
                 #endif
-                
+
                 // Removed unconditional auto-assignment of selectedExpiration:
                 /*
                 // If we don't have a selected expiration yet, choose the nearest and suppress refetch
@@ -1778,7 +1796,7 @@ struct ContentView: View {
                     suppressExpirationRefetch = true
                 }
                 */
-                
+
                 // Auto-select near-the-money strikes and contracts ONLY if an expiration is selected
                 if selectedExpiration != nil {
                     let price = Double(underlyingNowText) ?? expirySpot
@@ -1843,22 +1861,22 @@ struct ContentView: View {
             let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: selectedExpiration)
             await MainActor.run {
                 expirations = filterExpirationsForProviderTZ(chain.expirations)
-                
+
                 #if DEBUG
                 let rawCount = chain.expirations.count
                 let filteredCount = filterExpirationsForProviderTZ(chain.expirations).count
-                print("[DEBUG][ContentView] Expirations raw=\(rawCount), filtered(Eastern today+)=\(filteredCount)")
+                dlog("[DEBUG][ContentView] Expirations raw=\(rawCount), filtered(Eastern today+)=\(filteredCount)")
                 if let firstRaw = chain.expirations.first {
-                    print("[DEBUG][ContentView] First raw expiration:", firstRaw.formatted(date: .abbreviated, time: .omitted))
+                    dlog("[DEBUG][ContentView] First raw expiration: \(firstRaw.formatted(date: .abbreviated, time: .omitted))")
                 }
                 if let firstFiltered = expirations.first {
-                    print("[DEBUG][ContentView] First filtered expiration:", firstFiltered.formatted(date: .abbreviated, time: .omitted))
+                    dlog("[DEBUG][ContentView] First filtered expiration: \(firstFiltered.formatted(date: .abbreviated, time: .omitted))")
                 }
                 #endif
                 if expirations.isEmpty && fetchError == nil {
                     fetchError = "Option chain unavailable (no expirations)."
                 }
-                
+
                 callStrikes = chain.callStrikes
                 putStrikes = chain.putStrikes
                 cachedCallContracts = chain.callContracts
@@ -1870,12 +1888,12 @@ struct ContentView: View {
                 #if DEBUG
                 let pricedCalls = cachedCallContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
                 let pricedPuts  = cachedPutContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
-                print("[DEBUG][ContentView] (Refetch) Cached contracts -> calls: \(cachedCallContracts.count) (priced: \(pricedCalls.count)), puts: \(cachedPutContracts.count) (priced: \(pricedPuts.count))")
+                dlog("[DEBUG][ContentView] (Refetch) Cached contracts -> calls: \(cachedCallContracts.count) (priced: \(pricedCalls.count)), puts: \(cachedPutContracts.count) (priced: \(pricedPuts.count))")
                 if let c0 = cachedCallContracts.first {
-                    print("[DEBUG][ContentView] (Refetch) Sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))")
+                    dlog("[DEBUG][ContentView] (Refetch) Sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))")
                 }
                 if let p0 = cachedPutContracts.first {
-                    print("[DEBUG][ContentView] (Refetch) Sample put: strike=\(p0.strike) bid=\(String(describing: p0.bid)) ask=\(String(describing: p0.ask)) last=\(String(describing: p0.last)) mid=\(String(describing: p0.mid))")
+                    dlog("[DEBUG][ContentView] (Refetch) Sample put: strike=\(p0.strike) bid=\(String(describing: p0.bid)) ask=\(String(describing: p0.ask)) last=\(String(describing: p0.last)) mid=\(String(describing: p0.mid))")
                 }
                 #endif
 
@@ -2006,7 +2024,7 @@ struct ContentView: View {
         .background(.thinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
-    
+
     private var hasSelectedMarketPremium: Bool {
         if !useMarketPremium { return false }
         switch strategy {
@@ -2084,7 +2102,7 @@ struct ContentView: View {
         StrategyStore.shared.append(saved)
         showSavedConfirmation = true
     }
-    
+
     private var orderExplanation: String {
         let qty = max(1, contracts)
         let mult = Int(multiplier)
@@ -2119,7 +2137,7 @@ struct ContentView: View {
             return "Underlying ($\(underlyingStr)), Lower Strike (\(kLower)), Upper Strike (\(kUpper)), Long Premium (+\(premLower)), Short Premium (-\(premUpper)), \(netLabel), Contracts (\(qty) × \(mult))"
         }
     }
-    
+
     private var strikeBehaviorExplanation: String {
         let lowerK = OptionsFormat.number(lowerStrike)
         let upperK = OptionsFormat.number(upperStrike)
@@ -2144,7 +2162,7 @@ struct ContentView: View {
             return "Bull call spread: Below $\(lowerK) → lose net debit; between $\(lowerK) and $\(upperK) → approx (underlying price − $\(lowerK)) × \(mult) minus net debit; above $\(upperK) → capped ≈ ($\(upperK) − $\(lowerK)) × \(mult) minus net debit."
         }
     }
-    
+
     private var educationHeader: String {
         switch strategy {
         case .singleCall:
@@ -2230,7 +2248,7 @@ struct ContentView: View {
             return "Lose net debit/credit (\(netLabel) × \(mult))."
         }
     }
-    
+
     private var educationAboveIsCalculation: Bool {
         switch strategy {
         case .singleCall:
@@ -2252,7 +2270,7 @@ struct ContentView: View {
             return false
         }
     }
-    
+
     private func handlePlaceOrderConfirm(limit: Double, tif: PlaceOrderSheet.TimeInForce, quantity: Int, contract: OptionContract) async {
         // Ensure we have an expiration to trade against (fallback to first available)
         let expFallback = selectedExpiration ?? expirations.first
@@ -2290,53 +2308,53 @@ struct ContentView: View {
             if let fill = result.fill {
                 let px = OptionsFormat.money(fill.price)
                 orderResultText = "Filled \(fill.quantity) @ \(px). Order ID: \(result.placed.id)"
-                
-                let rightStr = (contract.kind == .call) ? "call" : "put"
-                let sideStr = (orderSideTS == .buy) ? "buy" : "sell"
-                let tifStr = (tif == .day) ? "DAY" : "GTC"
+
+//                _ = (contract.kind == .call) ? "call" : "put"
+//                _ = (orderSideTS == .buy) ? "buy" : "sell"
+//                _ = (tif == .day) ? "DAY" : "GTC"
                 let saved = SavedOrder(
                     id: result.placed.id,
                     placedAt: Date(),
                     symbol: symbol,
                     expiration: selectedExpiration,
-                    right: rightStr,
+                    right: (contract.kind == .call) ? SavedOrder.Right.call : SavedOrder.Right.put,
                     strike: contract.strike,
-                    side: sideStr,
+                    side: (orderSideTS == .buy) ? SavedOrder.Side.buy : SavedOrder.Side.sell,
                     quantity: quantity,
                     limit: limit,
-                    tif: tifStr,
+                    tif: (tif == .day) ? SavedOrder.TIF.day : SavedOrder.TIF.gtc,
                     status: (result.fill != nil) ? .filled : .working,
                     fillPrice: result.fill?.price,
                     fillQuantity: result.fill?.quantity,
                     note: nil
                 )
-                OrderStore.shared.append(saved)
-                
+                await OrderStore.shared.append(saved)
+
             } else {
                 let px = OptionsFormat.money(limit)
                 orderResultText = "Accepted. Working at \(px). Order ID: \(result.placed.id)"
-                
-                let rightStr = (contract.kind == .call) ? "call" : "put"
-                let sideStr = (orderSideTS == .buy) ? "buy" : "sell"
-                let tifStr = (tif == .day) ? "DAY" : "GTC"
+
+//                _ = (contract.kind == .call) ? "call" : "put"
+//                _ = (orderSideTS == .buy) ? "buy" : "sell"
+//                _ = (tif == .day) ? "DAY" : "GTC"
                 let saved = SavedOrder(
                     id: result.placed.id,
                     placedAt: Date(),
                     symbol: symbol,
                     expiration: selectedExpiration,
-                    right: rightStr,
+                    right: (contract.kind == .call) ? SavedOrder.Right.call : SavedOrder.Right.put,
                     strike: contract.strike,
-                    side: sideStr,
+                    side: (orderSideTS == .buy) ? SavedOrder.Side.buy : SavedOrder.Side.sell,
                     quantity: quantity,
                     limit: limit,
-                    tif: tifStr,
+                    tif: (tif == .day) ? SavedOrder.TIF.day : SavedOrder.TIF.gtc,
                     status: (result.fill != nil) ? .filled : .working,
                     fillPrice: result.fill?.price,
                     fillQuantity: result.fill?.quantity,
                     note: nil
                 )
-                OrderStore.shared.append(saved)
-                
+                await OrderStore.shared.append(saved)
+
             }
         } catch {
             orderResultText = "Order failed: \(error.localizedDescription)"
