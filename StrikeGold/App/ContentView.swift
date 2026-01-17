@@ -13,8 +13,8 @@ import Foundation
 
 @MainActor
 struct ContentView: View {
-    #if DEBUG
     @State private var debugLogsEnabled: Bool = false
+    #if DEBUG
     private func dlog(_ message: @autoclosure () -> String) {
         if debugLogsEnabled { print(message()) }
     }
@@ -227,9 +227,7 @@ struct ContentView: View {
         let onPlaceOrder: () -> Void
         let canPlaceOrder: Bool
 
-        #if DEBUG
         @Binding var debugLogsEnabled: Bool
-        #endif
 
         var body: some View {
             NavigationStack {

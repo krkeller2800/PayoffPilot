@@ -333,6 +333,7 @@ private struct OrderDetailView: View {
     @State private var marketBid: Double? = nil
     @State private var marketAsk: Double? = nil
     @State private var marketMid: Double? = nil
+    @State private var underlyingPrice: Double? = nil
 
     private func oppositeSide(for side: String) -> PlaceOrderSheet.OrderSide {
         return side.lowercased() == "buy" ? .sell : .buy
@@ -379,10 +380,16 @@ private struct OrderDetailView: View {
             do {
                 let isCall = order.right == .call
                 let (bid, ask, mid) = try await OrderMonitor.shared.fetchMarketReferences(symbol: order.symbol, expiration: exp, isCall: isCall, strike: order.strike)
+                var underlying: Double? = nil
+                // Try an underlying fetch if available; ignore if not supported
+                if let u = try? await OrderMonitor.shared.fetchUnderlyingPrice(symbol: order.symbol) {
+                    underlying = u
+                }
                 await MainActor.run {
                     self.marketBid = bid
                     self.marketAsk = ask
                     self.marketMid = mid
+                    self.underlyingPrice = underlying
                 }
             } catch {
                 // Ignore errors for market quotes
@@ -435,8 +442,9 @@ private struct OrderDetailView: View {
                                 .foregroundStyle(.secondary)
                         }
 
-                        LabeledContent("Current option data") {
-                            Text("Bid \(bidText)  Ask \(askText)  Mid \(midText)")
+                        LabeledContent("Current Prices") {
+                            let underlyingText = underlyingPrice.map { formatMoney($0) } ?? "—"
+                            Text("B \(bidText)  A \(askText)  M \(midText)  UL \(underlyingText)")
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                                 .monospacedDigit()
@@ -453,6 +461,29 @@ private struct OrderDetailView: View {
                                 .font(.caption2)
                                 .foregroundStyle(.secondary)
                         }
+                        // Position hint based on side (long/short) and option type, with expiration and "until" phrasing
+                        let strikeText = OptionsFormat.number(order.strike)
+                        let expirationSuffix: String = {
+                            guard let exp = order.expiration else { return "" }
+                            let preposition = (order.side == .buy) ? " until " : " before "
+                            return "\(preposition)\(exp.formatted(date: .abbreviated, time: .omitted))"
+                        }()
+                        let hintText: String = {
+                            switch (order.side, order.right) {
+                            case (.buy, .call):
+                                return "You have the right to buy \(order.symbol) at $\(strikeText)\(expirationSuffix)."
+                            case (.buy, .put):
+                                return "You have the right to sell \(order.symbol) at $\(strikeText)\(expirationSuffix)."
+                            case (.sell, .call):
+                                return "You may be obligated to sell \(order.symbol) at $\(strikeText) if assigned\(expirationSuffix)."
+                            case (.sell, .put):
+                                return "You may be obligated to buy \(order.symbol) at $\(strikeText) if assigned\(expirationSuffix)."
+                            }
+                        }()
+                        Text(hintText)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.leading)
                     }
                 }
 

@@ -296,5 +296,10 @@ actor OrderMonitor {
         
         return (bid, ask, mid)
     }
+    
+    /// Fetch the current underlying price for the given symbol using the monitor's QuoteService.
+    func fetchUnderlyingPrice(symbol: String) async throws -> Double {
+        return try await quotes.fetchDelayedPrice(symbol: symbol)
+    }
 }
 
