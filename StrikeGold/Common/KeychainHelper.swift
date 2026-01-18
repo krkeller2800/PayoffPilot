@@ -59,6 +59,9 @@ extension KeychainHelper {
         static let finnhubToken = "finnhub.token"
         static let polygonToken = "polygon.token"
         static let tradestationToken = "tradestation.token"
+        static let alpacaKey = "alpaca.key"
+        static let alpacaKeyId = "alpaca.keyId"
+        static let alpacaSecret = "alpaca.secret"
     }
 }
 

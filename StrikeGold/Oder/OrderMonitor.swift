@@ -79,6 +79,16 @@ actor OrderMonitor {
                 let provider = TradeStationProvider(token: token)
                 return QuoteService(provider: provider)
             }
+        case "Alpaca":
+            if let keyId = KeychainHelper.load(key: KeychainHelper.Keys.alpacaKeyId),
+               let secret = KeychainHelper.load(key: KeychainHelper.Keys.alpacaSecret),
+               !keyId.isEmpty, !secret.isEmpty {
+#if DEBUG
+                OrderMonitor.sdlog("[OrderMonitor] Restoring Alpaca provider from Keychain.")
+#endif
+                let provider = AlpacaProvider(keyId: keyId, secretKey: secret)
+                return QuoteService(provider: provider)
+            }
         default:
             break
         }

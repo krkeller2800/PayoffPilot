@@ -253,6 +253,34 @@ struct SettingsView: View {
                     }
                 }
 
+                if viewModel.selectedProvider == .alpaca {
+                    Section("Alpaca (BYO key)") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Enter your Alpaca Market Data API credentials.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            HStack(alignment: .firstTextBaseline) {
+                                TextField("API Key ID", text: $viewModel.alpacaKey)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
+                            HStack(alignment: .firstTextBaseline) {
+                                SecureField("API Secret Key", text: $viewModel.alpacaSecretKey)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
+                            Picker("Environment", selection: Binding(
+                                get: { viewModel.alpacaEnvironment },
+                                set: { viewModel.setAlpacaEnvironment($0) }
+                            )) {
+                                Text("Paper").tag("paper")
+                                Text("Live").tag("live")
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                    }
+                }
+
                 Section("Actions") {
                     if viewModel.selectedProvider == .tradier {
                         Grid(horizontalSpacing: 8, verticalSpacing: 8) {

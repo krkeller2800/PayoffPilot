@@ -1,32 +1,30 @@
-//
-//  QuoteService.swift
-//  StrikeGold
-//
-//  Created by Assistant on 12/31/25.
-//
-
 import Foundation
 
-// A lightweight, no-cost delayed quote and options chain fetcher using Yahoo Finance public endpoints.
-// For educational use only. This is not guaranteed for production trading apps.
+// MARK: - Shared Option Types
 
-struct OptionContract: Hashable {
-    enum Kind: String { case call, put }
+/// A lightweight representation of an option contract used by the app.
+struct OptionContract: Identifiable, Hashable {
+    enum Kind: String, Codable, CaseIterable, Identifiable { case call, put; var id: String { rawValue } }
+
+    // Provide a stable id based on kind+strike to satisfy SwiftUI/Identifiable use.
+    var id: String { "\(kind.rawValue)-\(strike)" }
+
     let kind: Kind
     let strike: Double
     let bid: Double?
     let ask: Double?
     let last: Double?
+
+    /// Midpoint convenience computed from bid/ask/last
     var mid: Double? {
-        if let b = bid, let a = ask, b > 0 && a > 0 {
-            return (b + a) / 2.0
-        }
-        if let b = bid, b > 0 { return b }
-        if let a = ask, a > 0 { return a }
+        if let b = bid, let a = ask, b > 0, a > 0 { return (b + a) / 2 }
+        if let a = ask { return a }
+        if let b = bid { return b }
         return last
     }
 }
 
+/// Container for an option chain snapshot and its available expirations.
 struct OptionChainData {
     let expirations: [Date]
     let callStrikes: [Double]
@@ -35,1105 +33,453 @@ struct OptionChainData {
     let putContracts: [OptionContract]
 }
 
-/// Abstraction for pluggable quote/chain providers.
+// MARK: - Provider Protocol
+
+/// Abstraction over different market data providers (Tradier, Finnhub, Polygon, Alpaca).
 protocol QuoteDataProvider {
+    /// Fetch a delayed underlying price for a stock symbol.
     func fetchDelayedPrice(symbol: String) async throws -> Double
-    func fetchOptionChain(symbol: String, expiration: Date?) async throws -> OptionChainData
+    /// Fetch an option chain for a specific expiration date.
+    func fetchOptionChain(symbol: String, expiration: Date) async throws -> OptionChainData
 }
 
-// Validation result for provider token checks
-struct ValidationResult {
-    let ok: Bool
-    let statusCode: Int?
-    let errorDescription: String?
+// MARK: - Quote Service
+
+/// Facade that delegates quote/chain requests to a concrete provider.
+/// Provides a default fallback provider so the app can run even when no BYO key is configured.
+final class QuoteService {
+    enum QuoteError: Error {
+        case network
+        case unauthorized
+        case invalidSymbol
+        case noData
+    }
+
+    private let provider: any QuoteDataProvider
+
+    /// Default initializer uses a simple fallback provider that returns empty chains and throws for price when unavailable.
+    init() {
+        self.provider = DefaultProvider()
+    }
+
+    /// Initialize with a specific data provider.
+    init(provider: any QuoteDataProvider) {
+        self.provider = provider
+    }
+
+    func fetchDelayedPrice(symbol: String) async throws -> Double {
+        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
+
+        // 1) Try latest trade price
+        do {
+            let req = try makeRequest(path: "/v2/stocks/trades/latest", queryItems: [
+                URLQueryItem(name: "symbols", value: trimmed.uppercased())
+            ])
+            dlog("[Alpaca] GET \(req.url?.absoluteString ?? "")")
+            let (data, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse {
+                dlog("[Alpaca] /v2/stocks/trades/latest status=\(http.statusCode)")
+                if http.statusCode != 200 {
+                    if let s = String(data: data, encoding: .utf8) { dlog("[Alpaca] trades/latest body: \(s)") }
+                }
+                if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
+                guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
+            }
+            let troot = try JSONDecoder().decode(APLatestStockTradesLatestRoot.self, from: data)
+            if let t = troot.trades?[trimmed.uppercased()], let p = t.p ?? t.price { return p }
+            // Fallback to single-object shape if needed
+            if let sroot = try? JSONDecoder().decode(APLatestStockTradeRoot.self, from: data),
+               let p = sroot.trade?.p ?? sroot.trade?.price { return p }
+        } catch let decErr as DecodingError {
+            dlog("[Alpaca] decode error trades/latest: \(decErr)")
+        } catch let e as QuoteService.QuoteError {
+            if case .unauthorized = e { throw e }
+            // fall through to quote mid on other errors
+        } catch {
+            // fall through
+        }
+
+        // 2) Fallback to latest quote mid
+        let req2 = try makeRequest(path: "/v2/stocks/quotes/latest", queryItems: [
+            URLQueryItem(name: "symbols", value: trimmed.uppercased())
+        ])
+        dlog("[Alpaca] GET \(req2.url?.absoluteString ?? "")")
+        let (data2, response2) = try await URLSession.shared.data(for: req2)
+        if let http = response2 as? HTTPURLResponse {
+            dlog("[Alpaca] /v2/stocks/quotes/latest status=\(http.statusCode)")
+            if http.statusCode != 200 {
+                if let s = String(data: data2, encoding: .utf8) { dlog("[Alpaca] quotes/latest body: \(s)") }
+            }
+            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
+            guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
+        }
+        // Try batched quotes shape first
+        let qmap = try JSONDecoder().decode(APLatestStockQuotesLatestRoot.self, from: data2)
+        if let q = qmap.quotes?[trimmed.uppercased()] {
+            let bid = q.bp ?? q.bid_price
+            let ask = q.ap ?? q.ask_price
+            if let b = bid, let a = ask, b > 0, a > 0 { return (b + a) / 2 }
+            if let a = ask { return a }
+            if let b = bid { return b }
+        }
+        // Fallback to single-object shape
+        let qroot = try JSONDecoder().decode(APLatestStockQuoteRoot.self, from: data2)
+        let bid = qroot.quote?.bp ?? qroot.quote?.bid_price
+        let ask = qroot.quote?.ap ?? qroot.quote?.ask_price
+        if let b = bid, let a = ask, b > 0, a > 0 { return (b + a) / 2 }
+        if let a = ask { return a }
+        if let b = bid { return b }
+        throw QuoteService.QuoteError.noData
+    }
+
+    func fetchOptionChain(symbol: String, expiration: Date) async throws -> OptionChainData {
+        return try await provider.fetchOptionChain(symbol: symbol, expiration: expiration)
+    }
+
+    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
+        if let alpacaProvider = provider as? AlpacaProvider {
+            return try alpacaProvider.makeRequest(path: path, queryItems: queryItems)
+        }
+        fatalError("makeRequest is only available for AlpacaProvider")
+    }
+
+    private func dlog(_ message: @autoclosure () -> String) {
+        if let alpacaProvider = provider as? AlpacaProvider {
+            alpacaProvider.dlog(message())
+        }
+    }
 }
 
-/// Tradier-backed provider for quotes and option chains (BYO key).
-/// Initialize with a user-provided OAuth token. Choose sandbox vs production via `environment`.
-struct TradierProvider: QuoteDataProvider {
+// MARK: - Default Fallback Provider
+
+/// A minimal provider used as a safe default when no external provider is configured.
+private struct DefaultProvider: QuoteDataProvider {
+    func fetchDelayedPrice(symbol: String) async throws -> Double {
+        // No default data source; report missing data.
+        throw QuoteService.QuoteError.noData
+    }
+
+    func fetchOptionChain(symbol: String, expiration: Date) async throws -> OptionChainData {
+        // Return an empty chain with the requested expiration for graceful UI handling.
+        return OptionChainData(
+            expirations: [expiration],
+            callStrikes: [],
+            putStrikes: [],
+            callContracts: [],
+            putContracts: []
+        )
+    }
+}
+
+// MARK: - Utilities
+
+extension Array {
+    /// Splits the array into consecutive chunks of at most `size` elements.
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return [] }
+        var result: [[Element]] = []
+        result.reserveCapacity((self.count / size) + 1)
+        var idx = startIndex
+        while idx < endIndex {
+            let next = index(idx, offsetBy: size, limitedBy: endIndex) ?? endIndex
+            result.append(Array(self[idx..<next]))
+            idx = next
+        }
+        return result
+    }
+}
+
+/// Alpaca-backed provider for quotes and option chains (BYO key/secret).
+/// Uses Alpaca Market Data v2 for stocks and v1beta1 for options.
+struct AlpacaProvider: QuoteDataProvider {
     enum Environment {
-        case production
-        case sandbox
+        case paper
+        case live
         var baseURL: String {
+            // Alpaca Market Data uses the same host for paper/live; trading uses different hosts.
+            // We keep the switch for future flexibility and clarity.
             switch self {
-            case .production: return "https://api.tradier.com"
-            case .sandbox: return "https://sandbox.tradier.com"
+            case .paper: return "https://data.alpaca.markets"
+            case .live:  return "https://data.alpaca.markets"
             }
         }
     }
 
-    private let token: String
+    private let keyId: String
+    private let secretKey: String
     private let environment: Environment
+    private let optionsFeed: String
 
-    #if DEBUG
-    private var debugLogsEnabled: Bool = false
-    private func dlog(_ message: @autoclosure () -> String) {
-        if debugLogsEnabled { print(message()) }
-    }
-    #endif
+    private var debugLogsEnabled: Bool
+    fileprivate func dlog(_ message: @autoclosure () -> String) { if debugLogsEnabled { print(message()) } }
 
-    init(token: String, environment: Environment = .production, debugLogsEnabled: Bool = false) {
-        self.token = token
+    init(keyId: String, secretKey: String, environment: Environment = .paper, optionsFeed: String = "indicative", debugLogsEnabled: Bool = true) {
+        self.keyId = keyId
+        self.secretKey = secretKey
         self.environment = environment
-        #if DEBUG
+        self.optionsFeed = optionsFeed
         self.debugLogsEnabled = debugLogsEnabled
-        #endif
+        dlog("[Alpaca] logging enabled")
     }
 
-    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
+    fileprivate func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
         var comps = URLComponents(string: environment.baseURL)
         comps?.path = path
         if !queryItems.isEmpty { comps?.queryItems = queryItems }
         guard let url = comps?.url else { throw QuoteService.QuoteError.invalidSymbol }
         var req = URLRequest(url: url)
         req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue(keyId, forHTTPHeaderField: "APCA-API-KEY-ID")
+        req.setValue(secretKey, forHTTPHeaderField: "APCA-API-SECRET-KEY")
         req.timeoutInterval = 12
         req.cachePolicy = .reloadIgnoringLocalCacheData
         return req
     }
 
+    // MARK: - QuoteDataProvider
     func fetchDelayedPrice(symbol: String) async throws -> Double {
         let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
-        let req = try makeRequest(path: "/v1/markets/quotes", queryItems: [
-            URLQueryItem(name: "symbols", value: trimmed.uppercased()),
-            URLQueryItem(name: "greeks", value: "false")
-        ])
-        let (data, response) = try await URLSession.shared.data(for: req)
-        if let http = response as? HTTPURLResponse {
-            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
-            guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
-        }
+
+        // 1) Try latest trade price
         do {
-            let root = try JSONDecoder().decode(TradierQuotesRoot.self, from: data)
-            guard let inner = root.quotes else { throw QuoteService.QuoteError.noData }
-            switch inner.quote {
-            case .one(let q):
-                if let p = q.last ?? q.close { return p }
-                if let b = q.bid, let a = q.ask, b > 0, a > 0 { return (b + a) / 2 }
-            case .many(let arr):
-                if let q = arr.first {
-                    if let p = q.last ?? q.close { return p }
-                    if let b = q.bid, let a = q.ask, b > 0, a > 0 { return (b + a) / 2 }
-                }
-            }
-            throw QuoteService.QuoteError.noData
-        } catch is DecodingError {
-            throw QuoteService.QuoteError.parse
-        }
-    }
-
-    func fetchOptionChain(symbol: String, expiration: Date?) async throws -> OptionChainData {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
-
-        // Fetch expirations first
-        let expReq = try makeRequest(path: "/v1/markets/options/expirations", queryItems: [
-            URLQueryItem(name: "symbol", value: trimmed.uppercased()),
-            URLQueryItem(name: "includeAllRoots", value: "true"),
-            URLQueryItem(name: "strikes", value: "false")
-        ])
-        let (expData, expResp) = try await URLSession.shared.data(for: expReq)
-        #if DEBUG
-        if let http = expResp as? HTTPURLResponse {
-            let body = String(data: expData.prefix(400), encoding: .utf8) ?? "(binary)"
-            let expURLString = expReq.url?.absoluteString ?? "?"
-                dlog("[DEBUG][Tradier] Expirations URL: \(expURLString)")
-            dlog("[DEBUG][Tradier] Expirations status: \(http.statusCode)")
-            dlog("[DEBUG][Tradier] Expirations body prefix:\n \(body)")
-        }
-        #endif
-        if let http = expResp as? HTTPURLResponse {
-            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
-            guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
-        }
-        let df = DateFormatter()
-        df.dateFormat = "yyyy-MM-dd"
-        df.timeZone = TimeZone(secondsFromGMT: 0)
-
-        var expirations: [Date] = []
-        if let root = try? JSONDecoder().decode(TradierExpirationsRoot.self, from: expData) {
-            let strings = root.expirations?.date ?? []
-            expirations = strings.compactMap { df.date(from: $0) }.sorted()
-        }
-
-        // Determine which expiration to use
-        var expToUseString: String? = nil
-        if let expiration { expToUseString = df.string(from: expiration) }
-        else if let first = expirations.first { expToUseString = df.string(from: first) }
-
-        var callStrikes: [Double] = []
-        var putStrikes: [Double] = []
-        var callContracts: [OptionContract] = []
-        var putContracts: [OptionContract] = []
-        if let expStr = expToUseString {
-            let chainReq = try makeRequest(path: "/v1/markets/options/chains", queryItems: [
-                URLQueryItem(name: "symbol", value: trimmed.uppercased()),
-                URLQueryItem(name: "expiration", value: expStr)
+            let req = try makeRequest(path: "/v2/stocks/trades/latest", queryItems: [
+                URLQueryItem(name: "symbols", value: trimmed.uppercased())
             ])
-            let (chainData, chainResp) = try await URLSession.shared.data(for: chainReq)
-            #if DEBUG
-            if let http = chainResp as? HTTPURLResponse {
-                let body = String(data: chainData.prefix(400), encoding: .utf8) ?? "(binary)"
-                let chainURLString = chainReq.url?.absoluteString ?? "?"
-                    dlog("[DEBUG][Tradier] Chains URL: \(chainURLString)")
-                dlog("[DEBUG][Tradier] Chains status: \(http.statusCode)")
-                dlog("[DEBUG][Tradier] Chains body prefix:\n \(body)")
-            }
-            #endif
-            if let http = chainResp as? HTTPURLResponse {
+            dlog("[Alpaca] GET \(req.url?.absoluteString ?? "")")
+            let (data, response) = try await URLSession.shared.data(for: req)
+            if let http = response as? HTTPURLResponse {
+                dlog("[Alpaca] /v2/stocks/trades/latest status=\(http.statusCode)")
+                if http.statusCode != 200 {
+                    if let s = String(data: data, encoding: .utf8) { dlog("[Alpaca] trades/latest body: \(s)") }
+                }
                 if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
                 guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
             }
-            do {
-                let chain = try JSONDecoder().decode(TradierChainsRoot.self, from: chainData)
-                let options = chain.options?.option ?? []
-                let callsList = options.filter { ($0.option_type ?? "").lowercased() == "call" }
-                let putsList  = options.filter { ($0.option_type ?? "").lowercased() == "put" }
-                callContracts = callsList.compactMap { o in
-                    guard let k = o.strike else { return nil }
-                    return OptionContract(kind: .call, strike: k, bid: o.bid, ask: o.ask, last: o.last)
-                }.sorted { $0.strike < $1.strike }
-                putContracts = putsList.compactMap { o in
-                    guard let k = o.strike else { return nil }
-                    return OptionContract(kind: .put, strike: k, bid: o.bid, ask: o.ask, last: o.last)
-                }.sorted { $0.strike < $1.strike }
-                let calls = Set(callsList.compactMap { $0.strike })
-                let puts  = Set(putsList.compactMap { $0.strike })
-                callStrikes = calls.sorted()
-                putStrikes  = puts.sorted()
-            } catch is DecodingError {
-                throw QuoteService.QuoteError.parse
-            }
-        }
-
-        #if DEBUG
-        dlog("[DEBUG][QuoteService] Provider chain -> expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced: \(callContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }.count + putContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }.count)")
-        if let ex = expirations.first { dlog("[DEBUG][QuoteService] Provider first expiration: \(ex)") }
-        if let sample = callContracts.first {
-            let mid: Double? = {
-                if let b = sample.bid, let a = sample.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
-                if let b = sample.bid, b > 0 { return b }
-                if let a = sample.ask, a > 0 { return a }
-                return sample.last
-            }()
-            dlog("[DEBUG][QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: mid))")
-        }
-        #endif
-
-        return OptionChainData(expirations: expirations, callStrikes: callStrikes, putStrikes: putStrikes, callContracts: callContracts, putContracts: putContracts)
-    }
-
-    /// Validate the current token by making a lightweight authorized request.
-    /// Returns true if the token appears valid (HTTP 200), false otherwise.
-    func validateToken() async -> Bool {
-        let result = await validateTokenDetailed()
-        #if DEBUG
-        if !result.ok {
-            let status = result.statusCode.map(String.init) ?? "?"
-            let message = result.errorDescription ?? "-"
-            dlog("[VALIDATE][Tradier] status=\(status) message=\(message)")
-        }
-        #endif
-        return result.ok
-    }
-
-    func validateTokenDetailed() async -> ValidationResult {
-        do {
-            let req = try makeRequest(path: "/v1/markets/quotes", queryItems: [
-                URLQueryItem(name: "symbols", value: "AAPL"),
-                URLQueryItem(name: "greeks", value: "false")
-            ])
-            let (_, response) = try await URLSession.shared.data(for: req)
-            if let http = response as? HTTPURLResponse {
-                if http.statusCode == 200 { return ValidationResult(ok: true, statusCode: 200, errorDescription: nil) }
-                let msg: String
-                switch http.statusCode {
-                case 401: msg = "Unauthorized: Invalid or expired token."
-                case 403: msg = "Forbidden: Token recognized but your plan doesn't include this endpoint."
-                default:  msg = "HTTP \(http.statusCode)."
-                }
-                return ValidationResult(ok: false, statusCode: http.statusCode, errorDescription: msg)
-            }
-            return ValidationResult(ok: false, statusCode: nil, errorDescription: "No HTTP response.")
+            let troot = try JSONDecoder().decode(APLatestStockTradesLatestRoot.self, from: data)
+            if let t = troot.trades?[trimmed.uppercased()], let p = t.p ?? t.price { return p }
+            // Fallback to single-object shape if needed
+            if let sroot = try? JSONDecoder().decode(APLatestStockTradeRoot.self, from: data),
+               let p = sroot.trade?.p ?? sroot.trade?.price { return p }
+        } catch let decErr as DecodingError {
+            dlog("[Alpaca] decode error trades/latest: \(decErr)")
+        } catch let e as QuoteService.QuoteError {
+            if case .unauthorized = e { throw e }
+            // fall through to quote mid on other errors
         } catch {
-            return ValidationResult(ok: false, statusCode: nil, errorDescription: error.localizedDescription)
+            // fall through
         }
-    }
 
-    static func validateTokenDetailed(token: String, environment: Environment = .production) async -> ValidationResult {
-        let provider = TradierProvider(token: token, environment: environment)
-        return await provider.validateTokenDetailed()
-    }
-
-    /// Convenience static helper to validate a token without constructing the provider elsewhere.
-    static func validateToken(token: String, environment: Environment = .production) async -> Bool {
-        let provider = TradierProvider(token: token, environment: environment)
-        return await provider.validateToken()
-    }
-}
-
-/// Finnhub-backed provider for quotes (BYO key). Option chains are not provided here; fall back to Yahoo.
-struct FinnhubProvider: QuoteDataProvider {
-    private let token: String
-
-    #if DEBUG
-    private var debugLogsEnabled: Bool = true
-    private func dlog(_ message: @autoclosure () -> String) { if debugLogsEnabled { print(message()) } }
-    #endif
-
-    init(token: String) {
-        self.token = token
-    }
-
-    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
-        var comps = URLComponents(string: "https://finnhub.io")
-        comps?.path = path
-        if !queryItems.isEmpty { comps?.queryItems = queryItems }
-        guard let url = comps?.url else { throw QuoteService.QuoteError.invalidSymbol }
-        var req = URLRequest(url: url)
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.timeoutInterval = 12
-        req.cachePolicy = .reloadIgnoringLocalCacheData
-        return req
-    }
-
-    func fetchDelayedPrice(symbol: String) async throws -> Double {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
-        let req = try makeRequest(path: "/api/v1/quote", queryItems: [
-            URLQueryItem(name: "symbol", value: trimmed.uppercased()),
-            URLQueryItem(name: "token", value: token)
-        ])
-        let (data, response) = try await URLSession.shared.data(for: req)
-        if let http = response as? HTTPURLResponse {
-            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
-            guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
-        }
-        struct FHQuote: Decodable {
-            let c: Double?   // current price
-            let pc: Double?  // previous close
-            let o: Double?   // open
-            let lp: Double?  // last price (some feeds)
-        }
-        do {
-            let q = try JSONDecoder().decode(FHQuote.self, from: data)
-            if let p = q.c ?? q.lp ?? q.o ?? q.pc { return p }
-            throw QuoteService.QuoteError.noData
-        } catch is DecodingError {
-            throw QuoteService.QuoteError.parse
-        }
-    }
-
-    func fetchOptionChain(symbol: String, expiration: Date?) async throws -> OptionChainData {
-        // Finnhub free tier does not provide full option chains in a way compatible here.
-        // Signal unauthorized so QuoteService falls back to Yahoo Finance.
-        throw QuoteService.QuoteError.unauthorized
-    }
-
-    /// Validate the current token by making a lightweight authorized request.
-    /// Returns true if the token appears valid (HTTP 200 and decodable), false otherwise.
-    func validateToken() async -> Bool {
-        let result = await validateTokenDetailed()
-        #if DEBUG
-        if !result.ok {
-            let status = result.statusCode.map(String.init) ?? "?"
-            let message = result.errorDescription ?? "-"
-            dlog("[VALIDATE][Finnhub] status=\(status) message=\(message)")
-        }
-        #endif
-        return result.ok
-    }
-
-    func validateTokenDetailed() async -> ValidationResult {
-        do {
-            let req = try makeRequest(path: "/api/v1/quote", queryItems: [
-                URLQueryItem(name: "symbol", value: "AAPL"),
-                URLQueryItem(name: "token", value: token)
-            ])
-            let (_, response) = try await URLSession.shared.data(for: req)
-            if let http = response as? HTTPURLResponse {
-                if http.statusCode == 200 { return ValidationResult(ok: true, statusCode: 200, errorDescription: nil) }
-                let msg: String
-                switch http.statusCode {
-                case 401: msg = "Unauthorized: Invalid or expired token."
-                case 403: msg = "Forbidden: Token recognized but your plan doesn't include this endpoint."
-                default:  msg = "HTTP \(http.statusCode)."
-                }
-                return ValidationResult(ok: false, statusCode: http.statusCode, errorDescription: msg)
-            }
-            return ValidationResult(ok: false, statusCode: nil, errorDescription: "No HTTP response.")
-        } catch {
-            return ValidationResult(ok: false, statusCode: nil, errorDescription: error.localizedDescription)
-        }
-    }
-
-    static func validateTokenDetailed(token: String) async -> ValidationResult {
-        let provider = FinnhubProvider(token: token)
-        return await provider.validateTokenDetailed()
-    }
-
-    /// Convenience static helper to validate a token without constructing the provider elsewhere.
-    static func validateToken(token: String) async -> Bool {
-        let provider = FinnhubProvider(token: token)
-        return await provider.validateToken()
-    }
-}
-
-/// Polygon-backed provider for quotes (BYO key). Option chains are not provided here; fall back to Yahoo.
-struct PolygonProvider: QuoteDataProvider {
-    private let token: String
-
-    #if DEBUG
-    private var debugLogsEnabled: Bool = true
-    private func dlog(_ message: @autoclosure () -> String) { if debugLogsEnabled { print(message()) } }
-    #endif
-
-    init(token: String) {
-        self.token = token
-    }
-
-    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
-        var comps = URLComponents(string: "https://api.polygon.io")
-        comps?.path = path
-        if !queryItems.isEmpty { comps?.queryItems = queryItems }
-        guard let url = comps?.url else { throw QuoteService.QuoteError.invalidSymbol }
-        var req = URLRequest(url: url)
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.timeoutInterval = 12
-        req.cachePolicy = .reloadIgnoringLocalCacheData
-        return req
-    }
-
-    func fetchDelayedPrice(symbol: String) async throws -> Double {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
-        // Use snapshot endpoint for a recent trade or day prices.
-        let req = try makeRequest(path: "/v2/snapshot/locale/us/markets/stocks/tickers/\(trimmed.uppercased())", queryItems: [
-            URLQueryItem(name: "apiKey", value: token)
-        ])
-        let (data, response) = try await URLSession.shared.data(for: req)
-        if let http = response as? HTTPURLResponse {
-            if http.statusCode == 401 || http.statusCode == 403 {
-                // Try a plan-friendly fallback to prev close before giving up
-                if let fallback = try await fetchPrevClose(symbol: trimmed.uppercased()) {
-                    return fallback
-                }
-                throw QuoteService.QuoteError.unauthorized
-            }
-            guard http.statusCode == 200 else {
-                // Best-effort fallback on other non-200s
-                if let fallback = try await fetchPrevClose(symbol: trimmed.uppercased()) {
-                    return fallback
-                }
-                throw QuoteService.QuoteError.network
-            }
-        }
-        struct SnapshotRoot: Decodable { let ticker: SnapshotTicker? }
-        struct SnapshotTicker: Decodable { let lastTrade: SnapshotTrade?; let day: SnapshotDay? }
-        struct SnapshotTrade: Decodable { let p: Double? }
-        struct SnapshotDay: Decodable { let c: Double?; let o: Double? }
-        do {
-            let snap = try JSONDecoder().decode(SnapshotRoot.self, from: data)
-            if let p = snap.ticker?.lastTrade?.p ?? snap.ticker?.day?.c ?? snap.ticker?.day?.o { return p }
-            throw QuoteService.QuoteError.noData
-        } catch is DecodingError {
-            throw QuoteService.QuoteError.parse
-        }
-    }
-
-    private func fetchPrevClose(symbol: String) async throws -> Double? {
-        let path = "/v2/aggs/ticker/\(symbol)/prev"
-        let req = try makeRequest(path: path, queryItems: [
-            URLQueryItem(name: "adjusted", value: "true"),
-            URLQueryItem(name: "apiKey", value: token)
-        ])
-        let (data, response) = try await URLSession.shared.data(for: req)
-        if let http = response as? HTTPURLResponse {
-            guard http.statusCode == 200 else { return nil }
-        }
-        struct PrevRoot: Decodable { let results: [PrevBar]? }
-        struct PrevBar: Decodable { let c: Double?; let o: Double? }
-        if let root = try? JSONDecoder().decode(PrevRoot.self, from: data), let bar = root.results?.first {
-            return bar.c ?? bar.o
-        }
-        return nil
-    }
-
-    func fetchOptionChain(symbol: String, expiration: Date?) async throws -> OptionChainData {
-        // Polygon chain access requires paid tiers and differs from our model; fall back to Yahoo.
-        throw QuoteService.QuoteError.unauthorized
-    }
-
-    /// Validate the current token by making a lightweight authorized request.
-    func validateToken() async -> Bool {
-        let result = await validateTokenDetailed()
-        #if DEBUG
-        if !result.ok {
-            let status = result.statusCode.map(String.init) ?? "?"
-            let message = result.errorDescription ?? "-"
-            dlog("[VALIDATE][Polygon] status=\(status) message=\(message)")
-        }
-        #endif
-        return result.ok
-    }
-
-    func validateTokenDetailed() async -> ValidationResult {
-        do {
-            let req = try makeRequest(path: "/v3/reference/tickers", queryItems: [
-                URLQueryItem(name: "limit", value: "1"),
-                URLQueryItem(name: "apiKey", value: token)
-            ])
-            let (_, response) = try await URLSession.shared.data(for: req)
-            if let http = response as? HTTPURLResponse {
-                if http.statusCode == 200 { return ValidationResult(ok: true, statusCode: 200, errorDescription: nil) }
-                let msg: String
-                switch http.statusCode {
-                case 401: msg = "Unauthorized: Invalid or expired API key."
-                case 403: msg = "Forbidden: Key recognized but your plan doesn't include this endpoint."
-                default:  msg = "HTTP \(http.statusCode)."
-                }
-                return ValidationResult(ok: false, statusCode: http.statusCode, errorDescription: msg)
-            }
-            return ValidationResult(ok: false, statusCode: nil, errorDescription: "No HTTP response.")
-        } catch {
-            return ValidationResult(ok: false, statusCode: nil, errorDescription: error.localizedDescription)
-        }
-    }
-
-    static func validateTokenDetailed(token: String) async -> ValidationResult {
-        let provider = PolygonProvider(token: token)
-        return await provider.validateTokenDetailed()
-    }
-
-    static func validateToken(token: String) async -> Bool {
-        let provider = PolygonProvider(token: token)
-        return await provider.validateToken()
-    }
-}
-
-/// TradeStation-backed provider for quotes (BYO key). Option chains fall back to Yahoo for now.
-struct TradeStationProvider: QuoteDataProvider {
-    private let token: String
-
-    #if DEBUG
-    private var debugLogsEnabled: Bool = true
-    private func dlog(_ message: @autoclosure () -> String) { if debugLogsEnabled { print(message()) } }
-    #endif
-
-    init(token: String) {
-        self.token = token
-    }
-
-    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
-        var comps = URLComponents(string: "https://api.tradestation.com")
-        comps?.path = path
-        if !queryItems.isEmpty { comps?.queryItems = queryItems }
-        guard let url = comps?.url else { throw QuoteService.QuoteError.invalidSymbol }
-        var req = URLRequest(url: url)
-        req.setValue("application/json", forHTTPHeaderField: "Accept")
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.timeoutInterval = 12
-        req.cachePolicy = .reloadIgnoringLocalCacheData
-        return req
-    }
-
-    func fetchDelayedPrice(symbol: String) async throws -> Double {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
-        // TradeStation quotes endpoint (v2/v3). Using a tolerant decoder for typical fields.
-        let req = try makeRequest(path: "/v3/marketdata/quotes", queryItems: [
+        // 2) Fallback to latest quote mid
+        let req2 = try makeRequest(path: "/v2/stocks/quotes/latest", queryItems: [
             URLQueryItem(name: "symbols", value: trimmed.uppercased())
         ])
-        let (data, response) = try await URLSession.shared.data(for: req)
-        if let http = response as? HTTPURLResponse {
+        dlog("[Alpaca] GET \(req2.url?.absoluteString ?? "")")
+        let (data2, response2) = try await URLSession.shared.data(for: req2)
+        if let http = response2 as? HTTPURLResponse {
+            dlog("[Alpaca] /v2/stocks/quotes/latest status=\(http.statusCode)")
+            if http.statusCode != 200 {
+                if let s = String(data: data2, encoding: .utf8) { dlog("[Alpaca] quotes/latest body: \(s)") }
+            }
             if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
             guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
         }
-        struct TSQuotesRoot: Decodable { let Quotes: [TSQuote]? }
-        struct TSQuote: Decodable {
-            let Last: Double?
-            let Close: Double?
-            let Bid: Double?
-            let Ask: Double?
+        let qmap = try JSONDecoder().decode(APLatestStockQuotesLatestRoot.self, from: data2)
+        if let q = qmap.quotes?[trimmed.uppercased()] {
+            let bid = q.bp ?? q.bid_price
+            let ask = q.ap ?? q.ask_price
+            if let b = bid, let a = ask, b > 0, a > 0 { return (b + a) / 2 }
+            if let a = ask { return a }
+            if let b = bid { return b }
         }
-        do {
-            let root = try JSONDecoder().decode(TSQuotesRoot.self, from: data)
-            if let q = root.Quotes?.first {
-                if let p = q.Last ?? q.Close { return p }
-                if let b = q.Bid, let a = q.Ask, b > 0, a > 0 { return (b + a) / 2 }
-            }
-            throw QuoteService.QuoteError.noData
-        } catch is DecodingError {
-            throw QuoteService.QuoteError.parse
-        }
+        let qroot = try JSONDecoder().decode(APLatestStockQuoteRoot.self, from: data2)
+        let bid = qroot.quote?.bp ?? qroot.quote?.bid_price
+        let ask = qroot.quote?.ap ?? qroot.quote?.ask_price
+        if let b = bid, let a = ask, b > 0, a > 0 { return (b + a) / 2 }
+        if let a = ask { return a }
+        if let b = bid { return b }
+        throw QuoteService.QuoteError.noData
     }
 
     func fetchOptionChain(symbol: String, expiration: Date?) async throws -> OptionChainData {
-        // Not implemented for TradeStation in this version; fall back to Yahoo by signaling unauthorized.
-        throw QuoteService.QuoteError.unauthorized
-    }
+        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
+        dlog("[Alpaca] fetchOptionChain symbol=\(trimmed.uppercased()) feed=\(optionsFeed)")
 
-    /// Validate the current token by making a lightweight authorized request.
-    func validateToken() async -> Bool {
-        let result = await validateTokenDetailed()
-        #if DEBUG
-        if !result.ok {
-            let status = result.statusCode.map(String.init) ?? "?"
-            let message = result.errorDescription ?? "-"
-            dlog("[VALIDATE][TradeStation] status=\(status) message=\(message)")
-        }
-        #endif
-        return result.ok
-    }
+        // Build expirations and contracts from snapshots only using OCC symbols
+        let yydf = DateFormatter()
+        yydf.dateFormat = "yyMMdd"
+        yydf.timeZone = TimeZone(secondsFromGMT: 0)
 
-    func validateTokenDetailed() async -> ValidationResult {
+        let upper = trimmed.uppercased()
+
+        // Fetch snapshots for the underlying
+        var snapshots: [String: APOptionSnapshot] = [:]
         do {
-            let req = try makeRequest(path: "/v3/marketdata/quotes", queryItems: [
-                URLQueryItem(name: "symbols", value: "AAPL")
+            let snapReq = try makeRequest(path: "/v1beta1/options/snapshots/\(upper)", queryItems: [
+                URLQueryItem(name: "feed", value: optionsFeed),
+                URLQueryItem(name: "limit", value: "1000")
             ])
-            let (_, response) = try await URLSession.shared.data(for: req)
-            if let http = response as? HTTPURLResponse {
-                if http.statusCode == 200 { return ValidationResult(ok: true, statusCode: 200, errorDescription: nil) }
-                let msg: String
-                switch http.statusCode {
-                case 401: msg = "Unauthorized: Invalid or expired token."
-                case 403: msg = "Forbidden: Token recognized but your plan doesn't include this endpoint."
-                default:  msg = "HTTP \(http.statusCode)."
+            dlog("[Alpaca] GET \(snapReq.url?.absoluteString ?? "")")
+            let (data, resp) = try await URLSession.shared.data(for: snapReq)
+            if let http = resp as? HTTPURLResponse {
+                dlog("[Alpaca] /v1beta1/options/snapshots status=\(http.statusCode)")
+                if http.statusCode != 200 {
+                    if let s = String(data: data, encoding: .utf8) { dlog("[Alpaca] snapshots body: \(s)") }
                 }
-                return ValidationResult(ok: false, statusCode: http.statusCode, errorDescription: msg)
+                if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
+                guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
             }
-            return ValidationResult(ok: false, statusCode: nil, errorDescription: "No HTTP response.")
+            let root = try JSONDecoder().decode(APOptionSnapshotsRoot.self, from: data)
+            snapshots = root.snapshots ?? [:]
+            dlog("[Alpaca] snapshots count=\(snapshots.count)")
         } catch {
-            return ValidationResult(ok: false, statusCode: nil, errorDescription: error.localizedDescription)
+            dlog("[Alpaca] snapshots fetch failed: \(error.localizedDescription)")
+            return OptionChainData(expirations: [], callStrikes: [], putStrikes: [], callContracts: [], putContracts: [])
         }
-    }
 
-    static func validateTokenDetailed(token: String) async -> ValidationResult {
-        let provider = TradeStationProvider(token: token)
-        return await provider.validateTokenDetailed()
-    }
+        // Parse OCC symbols: UNDERLYING(1-6) + YYMMDD + C/P + STRIKE(8 with 3 implied decimals)
+        struct ParsedOption { let exp: Date; let kind: OptionContract.Kind; let strike: Double; let bid: Double?; let ask: Double? }
+        var parsed: [ParsedOption] = []
+        parsed.reserveCapacity(snapshots.count)
 
-    static func validateToken(token: String) async -> Bool {
-        let provider = TradeStationProvider(token: token)
-        return await provider.validateToken()
-    }
-}
+        for (sym, snap) in snapshots {
+            guard sym.hasPrefix(upper) else { continue }
+            let remainder = String(sym.dropFirst(upper.count))
+            guard remainder.count >= 15 else { continue }
+            let dateStr = String(remainder.prefix(6))
+            let typeChar = remainder.dropFirst(6).prefix(1)
+            let strikeStr = String(remainder.dropFirst(7).prefix(8))
+            guard let exp = yydf.date(from: dateStr) else { continue }
+            let kind: OptionContract.Kind = (typeChar.uppercased() == "C") ? .call : .put
+            guard let strikeInt = Int(strikeStr) else { continue }
+            let strike = Double(strikeInt) / 1000.0
+            let bid = snap.latestQuote?.bp ?? snap.latestQuote?.bid_price
+            let ask = snap.latestQuote?.ap ?? snap.latestQuote?.ask_price
+            parsed.append(ParsedOption(exp: exp, kind: kind, strike: strike, bid: bid, ask: ask))
+        }
 
-actor QuoteService {
-    private let provider: QuoteDataProvider?
+        // Build expirations list
+        let expirationsSet = Set(parsed.map { $0.exp })
+        let expirations = expirationsSet.sorted()
 
-    #if DEBUG
-    private var debugLogsEnabled: Bool = false
-    func setDebugLogging(_ enabled: Bool) { debugLogsEnabled = enabled }
-    private func dlog(_ message: @autoclosure () -> String) {
-        if debugLogsEnabled { print(message()) }
-    }
-    #endif
+        // Select target expiration
+        let targetExp: Date? = expiration ?? expirations.first
+        guard let selectedExp = targetExp else {
+            return OptionChainData(expirations: expirations, callStrikes: [], putStrikes: [], callContracts: [], putContracts: [])
+        }
 
-    #if DEBUG
-    nonisolated private static func _debugLog(_ message: @autoclosure () -> String) {
-        // Static, nonisolated logger for use during initialization when `self` is not available.
-        print(message())
-    }
-    #endif
+        // Filter parsed options for the selected expiration
+        let optionsForDay = parsed.filter { Calendar.current.isDate($0.exp, inSameDayAs: selectedExp) }
 
-    init(provider: QuoteDataProvider? = nil) {
-        self.provider = provider
-        #if DEBUG
-        let providerDesc: String = {
-            if let p = provider { return String(describing: type(of: p)) }
-            return "nil"
-        }()
-        QuoteService._debugLog("[QuoteService] init with provider: \(providerDesc)")
-        #endif
-    }
+        // Collect strikes by kind
+        let callStrikes = Array(Set(optionsForDay.filter { $0.kind == .call }.map { $0.strike })).sorted()
+        let putStrikes  = Array(Set(optionsForDay.filter { $0.kind == .put  }.map { $0.strike })).sorted()
 
-    enum QuoteError: Error, LocalizedError {
-        case invalidSymbol
-        case network
-        case unauthorized
-        case parse
-        case noData
-
-        var errorDescription: String? {
-            switch self {
-            case .invalidSymbol: return "Invalid symbol."
-            case .network: return "Network error."
-            case .unauthorized: return "Option chain not available. Enter strikes manually."
-            case .parse: return "Failed to parse data."
-            case .noData: return "No data available."
+        // Build contracts with latest bid/ask from snapshots
+        let callContracts: [OptionContract] = callStrikes.map { s in
+            if let opt = optionsForDay.first(where: { $0.kind == .call && abs($0.strike - s) < 0.0001 }) {
+                return OptionContract(kind: .call, strike: s, bid: opt.bid, ask: opt.ask, last: nil)
             }
-        }
-    }
-    
-    nonisolated private func makeRequest(url: URL) -> URLRequest {
-        var request = URLRequest(url: url)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
-        request.setValue("Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1", forHTTPHeaderField: "User-Agent")
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 12
-        return request
-    }
+            return OptionContract(kind: .call, strike: s, bid: nil, ask: nil, last: nil)
+        }.sorted { $0.strike < $1.strike }
 
-    nonisolated private func fetchPriceFromStooq(symbol: String) async throws -> Double {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteError.invalidSymbol }
-        var s = trimmed.lowercased()
-        if !s.contains(".") { s += ".us" }
-
-        func numeric(_ v: String) -> Double? {
-            let cleaned = v.replacingOccurrences(of: ",", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let upper = cleaned.uppercased()
-            if upper.isEmpty || upper == "N/D" || upper == "N/A" { return nil }
-            return Double(cleaned)
-        }
-
-        func getPrice(from host: String) async -> Double? {
-            let urlString = "\(host)/q/l/?s=\(s)&f=sd2t2ohlcv&h&e=csv"
-            guard let url = URL(string: urlString) else { return nil }
-            do {
-                let (data, response) = try await URLSession.shared.data(from: url)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
-                guard let csv = String(data: data, encoding: .utf8) else { return nil }
-                let lines = csv.split(separator: "\n").map(String.init)
-                guard lines.count >= 2 else { return nil }
-                let headers = lines[0].split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
-                let values  = lines[1].split(separator: ",").map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-                func idx(_ name: String) -> Int? { headers.firstIndex(of: name) }
-                var price: Double? = nil
-                if let ci = idx("close"), ci < values.count { price = numeric(values[ci]) }
-                if price == nil, let oi = idx("open"), oi < values.count { price = numeric(values[oi]) }
-                return price
-            } catch {
-                return nil
+        let putContracts: [OptionContract] = putStrikes.map { s in
+            if let opt = optionsForDay.first(where: { $0.kind == .put && abs($0.strike - s) < 0.0001 }) {
+                return OptionContract(kind: .put, strike: s, bid: opt.bid, ask: opt.ask, last: nil)
             }
-        }
+            return OptionContract(kind: .put, strike: s, bid: nil, ask: nil, last: nil)
+        }.sorted { $0.strike < $1.strike }
 
-        if let p = await getPrice(from: "https://stooq.com") { return p }
-        if let p = await getPrice(from: "https://stooq.pl") { return p }
-        throw QuoteError.noData
-    }
-    
-    nonisolated private func fetchPriceFromYahooChart(symbol: String) async throws -> Double {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteError.invalidSymbol }
-        var comps = URLComponents(string: "https://query2.finance.yahoo.com/v8/finance/chart/\(trimmed.uppercased())")
-        comps?.queryItems = [
-            URLQueryItem(name: "range", value: "1d"),
-            URLQueryItem(name: "interval", value: "1d"),
-            URLQueryItem(name: "lang", value: "en-US"),
-            URLQueryItem(name: "region", value: "US")
-        ]
-        guard let url = comps?.url else { throw QuoteError.invalidSymbol }
-        let request = makeRequest(url: url)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse {
-            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteError.unauthorized }
-            guard http.statusCode == 200 else { throw QuoteError.network }
-        }
-        do {
-            let decoded = try JSONDecoder().decode(YFChartRoot.self, from: data)
-            if let result = decoded.chart.result?.first {
-                if let p = result.meta?.regularMarketPrice { return p }
-                if let closes = result.indicators?.quote?.first?.close?.compactMap({ $0 }), let last = closes.last { return last }
-                if let prev = result.meta?.previousClose { return prev }
-            }
-            throw QuoteError.noData
-        } catch is DecodingError {
-            throw QuoteError.parse
-        }
-    }
-    
-    // MARK: - Public API
+        dlog("[Alpaca] expirations=\(expirations.count) selected=\(selectedExp) calls=\(callContracts.count) puts=\(putContracts.count)")
 
-    func fetchDelayedPrice(symbol: String) async throws -> Double {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteError.invalidSymbol }
-
-        // Try injected provider first
-        if let provider {
-            do {
-                return try await provider.fetchDelayedPrice(symbol: trimmed)
-            } catch {
-                // fall back to Yahoo/Stooq
-            }
-        }
-
-        var comps = URLComponents(string: "https://query2.finance.yahoo.com/v7/finance/quote")
-        comps?.queryItems = [
-            URLQueryItem(name: "symbols", value: trimmed.uppercased()),
-            URLQueryItem(name: "lang", value: "en-US"),
-            URLQueryItem(name: "region", value: "US")
-        ]
-        guard let url = comps?.url else { throw QuoteError.invalidSymbol }
-
-        // 1) Try Yahoo quote endpoint
-         do {
-            let request = makeRequest(url: url)
-            let (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse {
-                if http.statusCode == 401 || http.statusCode == 403 { throw QuoteError.unauthorized }
-                guard http.statusCode == 200 else { throw QuoteError.network }
-            }
-            let decoded = try JSONDecoder().decode(YFQuoteRoot.self, from: data)
-            if let item = decoded.quoteResponse.result.first {
-                if let p = item.regularMarketPrice
-                    ?? item.postMarketPrice
-                    ?? item.preMarketPrice
-                    ?? item.regularMarketOpen
-                    ?? item.regularMarketPreviousClose {
-                    return p
-                }
-                if let bid = item.bid, let ask = item.ask, bid > 0, ask > 0 {
-                    return (bid + ask) / 2.0
-                }
-            }
-         } catch {
-            // proceed to next fallback
-         }
-
-        // 2) Try Yahoo chart endpoint
-         do {
-            let p = try await fetchPriceFromYahooChart(symbol: trimmed)
-            return p
-         } catch {
-            // proceed to next fallback
-         }
-
-        // 3) Fallback to Stooq CSV
-         return try await fetchPriceFromStooq(symbol: trimmed)
-    }
-
-    func fetchOptionChain(symbol: String, expiration: Date? = nil) async throws -> OptionChainData {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteError.invalidSymbol }
-
-        #if DEBUG
-        if provider == nil {
-            dlog("[QuoteService] No custom provider. Falling back to Yahoo for options.")
-        } else {
-            dlog("[QuoteService] Using custom provider for options.")
-        }
-        #endif
-
-        if let provider {
-            do {
-                let data = try await provider.fetchOptionChain(symbol: trimmed, expiration: expiration)
-                var combinedContracts: [OptionContract] = []
-                combinedContracts.reserveCapacity(data.callContracts.count + data.putContracts.count)
-                combinedContracts.append(contentsOf: data.callContracts)
-                combinedContracts.append(contentsOf: data.putContracts)
-                let pricedProvider: [OptionContract] = combinedContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
-
-                #if DEBUG
-                dlog("[QuoteService] Provider chain -> expirations: \(data.expirations.count), calls: \(data.callContracts.count), puts: \(data.putContracts.count), priced: \(pricedProvider.count)")
-                dlog("[QuoteService] Provider first expiration: \(String(describing: data.expirations.first))")
-                if let sample = data.callContracts.first {
-                    let mid: Double? = {
-                        if let b = sample.bid, let a = sample.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
-                        if let b = sample.bid, b > 0 { return b }
-                        if let a = sample.ask, a > 0 { return a }
-                        return sample.last
-                    }()
-                    dlog("[QuoteService] Provider sample call: strike=\(sample.strike) bid=\(String(describing: sample.bid)) ask=\(String(describing: sample.ask)) last=\(String(describing: sample.last)) mid=\(String(describing: mid))")
-                }
-                #endif
-                // If provider returned contracts with any pricing, use it; otherwise fall back to Yahoo
-                let hasAnyPrice = !pricedProvider.isEmpty
-                if hasAnyPrice || (!data.callContracts.isEmpty || !data.putContracts.isEmpty) {
-                    return data
-                }
-                // else: fall through to Yahoo fallback below
-            } catch {
-                // fall back to Yahoo Finance
-            }
-        }
-
-        func parseChain(_ data: Data) throws -> (expirations: [Date], callStrikes: [Double], putStrikes: [Double], callContracts: [OptionContract], putContracts: [OptionContract]) {
-            let decoded = try JSONDecoder().decode(YFOptionsRoot.self, from: data)
-            guard let result = decoded.optionChain.result.first else {
-                return ([], [], [], [], [])
-            }
-            let expirations: [Date] = (result.expirationDates ?? []).map { Date(timeIntervalSince1970: TimeInterval($0)) }.sorted()
-            let opts = result.options.first
-            let calls = opts?.calls ?? []
-            let puts  = opts?.puts  ?? []
-
-            // Strikes from arrays if provided; else fall back to result.strikes
-            var callStrikes: [Double] = calls.compactMap { $0.strike?.raw ?? $0.strike?.double }
-            var putStrikes:  [Double] = puts.compactMap  { $0.strike?.raw ?? $0.strike?.double }
-            if callStrikes.isEmpty || putStrikes.isEmpty {
-                if let strikes = result.strikes, !strikes.isEmpty {
-                    let sorted = strikes.sorted()
-                    if callStrikes.isEmpty { callStrikes = sorted }
-                    if putStrikes.isEmpty  { putStrikes  = sorted }
-                }
-            }
-
-            let callContracts: [OptionContract] = calls.compactMap { c in
-                guard let k = c.strike?.raw ?? c.strike?.double else { return nil }
-                return OptionContract(kind: .call, strike: k, bid: c.bid, ask: c.ask, last: c.lastPrice)
-            }.sorted { $0.strike < $1.strike }
-
-            let putContracts: [OptionContract] = puts.compactMap { p in
-                guard let k = p.strike?.raw ?? p.strike?.double else { return nil }
-                return OptionContract(kind: .put, strike: k, bid: p.bid, ask: p.ask, last: p.lastPrice)
-            }.sorted { $0.strike < $1.strike }
-
-            #if DEBUG
-            let pricedCalls = callContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
-            let pricedPuts  = putContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
-            dlog("[YahooOptions] expirations: \(expirations.count), calls: \(callContracts.count), puts: \(putContracts.count), priced calls: \(pricedCalls.count), priced puts: \(pricedPuts.count)")
-            dlog("[YahooOptions] first expiration: \(String(describing: expirations.first))")
-            if let c0 = callContracts.first {
-                let mid: Double? = {
-                    if let b = c0.bid, let a = c0.ask, b > 0 && a > 0 { return (b + a) / 2.0 }
-                    if let b = c0.bid, b > 0 { return b }
-                    if let a = c0.ask, a > 0 { return a }
-                    return c0.last
-                }()
-                dlog("[YahooOptions] sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: mid))")
-            }
-            #endif
-            return (expirations, callStrikes.sorted(), putStrikes.sorted(), callContracts, putContracts)
-        }
-
-        var components = URLComponents(string: "https://query2.finance.yahoo.com/v7/finance/options/\(trimmed.uppercased())")
-        var qItems: [URLQueryItem] = [
-            URLQueryItem(name: "lang", value: "en-US"),
-            URLQueryItem(name: "region", value: "US")
-        ]
-        if let expiration {
-            let unix = Int(expiration.timeIntervalSince1970)
-            qItems.append(URLQueryItem(name: "date", value: String(unix)))
-        }
-        components?.queryItems = qItems
-        guard let url = components?.url else { throw QuoteError.invalidSymbol }
-
-        let request = makeRequest(url: url)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse {
-            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteError.unauthorized }
-            guard http.statusCode == 200 else { throw QuoteError.network }
-        }
-
-        do {
-            let parsed = try parseChain(data)
-
-            // If no specific expiration was requested and we got no strikes, try the nearest expiration explicitly.
-            if expiration == nil && parsed.callStrikes.isEmpty && parsed.putStrikes.isEmpty, let firstExp = parsed.expirations.first {
-                var c2 = URLComponents(string: "https://query2.finance.yahoo.com/v7/finance/options/\(trimmed.uppercased())")
-                c2?.queryItems = [
-                    URLQueryItem(name: "lang", value: "en-US"),
-                    URLQueryItem(name: "region", value: "US"),
-                    URLQueryItem(name: "date", value: String(Int(firstExp.timeIntervalSince1970)))
-                ]
-                if let url2 = c2?.url {
-                    let req2 = makeRequest(url: url2)
-                    let (data2, response2) = try await URLSession.shared.data(for: req2)
-                    if let http2 = response2 as? HTTPURLResponse {
-                        if http2.statusCode == 401 || http2.statusCode == 403 { throw QuoteError.unauthorized }
-                        guard http2.statusCode == 200 else { throw QuoteError.network }
-                    }
-                    let parsed2 = try parseChain(data2)
-                    let finalExpirations = parsed2.expirations.isEmpty ? parsed.expirations : parsed2.expirations
-
-                    let callsContracts: [OptionContract]
-                    let putsContracts:  [OptionContract]
-                    if !parsed2.callContracts.isEmpty || !parsed2.putContracts.isEmpty {
-                        callsContracts = parsed2.callContracts
-                        putsContracts  = parsed2.putContracts
-                    } else {
-                        callsContracts = parsed2.callStrikes.map { OptionContract(kind: .call, strike: $0, bid: nil, ask: nil, last: nil) }
-                        putsContracts  = parsed2.putStrikes.map  { OptionContract(kind: .put,  strike: $0, bid: nil, ask: nil, last: nil) }
-                    }
-
-                    return OptionChainData(
-                        expirations: finalExpirations,
-                        callStrikes: parsed2.callStrikes,
-                        putStrikes: parsed2.putStrikes,
-                        callContracts: callsContracts,
-                        putContracts: putsContracts
-                    )
-                }
-            }
-
-            let callsContracts: [OptionContract]
-            let putsContracts:  [OptionContract]
-            if !parsed.callContracts.isEmpty || !parsed.putContracts.isEmpty {
-                callsContracts = parsed.callContracts
-                putsContracts  = parsed.putContracts
-            } else {
-                callsContracts = parsed.callStrikes.map { OptionContract(kind: .call, strike: $0, bid: nil, ask: nil, last: nil) }
-                putsContracts  = parsed.putStrikes.map  { OptionContract(kind: .put,  strike: $0, bid: nil, ask: nil, last: nil) }
-            }
-
-            return OptionChainData(
-                expirations: parsed.expirations,
-                callStrikes: parsed.callStrikes,
-                putStrikes: parsed.putStrikes,
-                callContracts: callsContracts,
-                putContracts: putsContracts
-            )
-        } catch is DecodingError {
-            throw QuoteError.parse
-        } catch {
-            throw error
-        }
+        return OptionChainData(
+            expirations: expirations,
+            callStrikes: callStrikes,
+            putStrikes: putStrikes,
+            callContracts: callContracts,
+            putContracts: putContracts
+        )
     }
 }
 
-// MARK: - Yahoo Finance JSON models (minimal)
-
-private nonisolated struct YFQuoteRoot: Decodable {
-    let quoteResponse: YFQuoteResponse
-}
-
-private nonisolated struct YFQuoteResponse: Decodable {
-    let result: [YFQuoteItem]
-}
-
-private nonisolated struct YFQuoteItem: Decodable {
-    let regularMarketPrice: Double?
-    let postMarketPrice: Double?
-    let regularMarketOpen: Double?
-    let regularMarketPreviousClose: Double?
-    let preMarketPrice: Double?
-    let bid: Double?
-    let ask: Double?
-}
-
-private nonisolated struct YFOptionsRoot: Decodable {
-    let optionChain: YFOptionChain
-}
-
-private nonisolated struct YFOptionChain: Decodable {
-    let result: [YFChainResult]
-}
-
-private nonisolated struct YFChainResult: Decodable {
-    let expirationDates: [Int]?
-    let strikes: [Double]?
-    let options: [YFChainOptions]
-}
-
-private nonisolated struct YFChainOptions: Decodable {
-    let calls: [YFContract]?
-    let puts: [YFContract]?
-}
-
-private nonisolated struct YFDoubleOrObject: Decodable {
-    let raw: Double?
-    let double: Double?
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if let d = try? container.decode(Double.self) {
-            self.double = d
-            self.raw = d
-            return
-        }
-        if let obj = try? container.decode([String: Double].self), let r = obj["raw"] {
-            self.raw = r
-            self.double = r
-            return
-        }
-        self.raw = nil
-        self.double = nil
+extension AlpacaProvider {
+    /// Bridge to satisfy `QuoteDataProvider` which requires a non-optional expiration parameter.
+    func fetchOptionChain(symbol: String, expiration: Date) async throws -> OptionChainData {
+        return try await self.fetchOptionChain(symbol: symbol, expiration: Optional(expiration))
     }
 }
+// MARK: - Alpaca API DTOs
 
-private nonisolated struct YFContract: Decodable {
-    let strike: YFDoubleOrObject?
-    let bid: Double?
-    let ask: Double?
-    let lastPrice: Double?
-}
-private nonisolated struct YFChartRoot: Decodable {
-    let chart: YFChart
+/// Latest stock trade response
+struct APLatestStockTradeRoot: Codable {
+    let trade: APLatestStockTrade?
 }
 
-private nonisolated struct YFChart: Decodable {
-    let result: [YFChartResult]?
+struct APLatestStockTradesLatestRoot: Codable {
+    let trades: [String: APLatestStockTrade]?
 }
 
-private nonisolated struct YFChartResult: Decodable {
-    let meta: YFChartMeta?
-    let indicators: YFChartIndicators?
+struct APLatestStockQuotesLatestRoot: Codable {
+    let quotes: [String: APLatestStockQuote]?
 }
 
-private nonisolated struct YFChartMeta: Decodable {
-    let regularMarketPrice: Double?
-    let previousClose: Double?
+struct APLatestStockTrade: Codable {
+    /// Price fields may appear as `p` or `price` depending on feed
+    let p: Double?
+    let price: Double?
 }
 
-private nonisolated struct YFChartIndicators: Decodable {
-    let quote: [YFChartQuote]?
+/// Latest stock quote response
+struct APLatestStockQuoteRoot: Codable {
+    let quote: APLatestStockQuote?
 }
 
-private nonisolated struct YFChartQuote: Decodable {
-    let close: [Double?]?
+struct APLatestStockQuote: Codable {
+    /// Bid may appear as `bp` or `bid_price`
+    let bp: Double?
+    let bid_price: Double?
+    /// Ask may appear as `ap` or `ask_price`
+    let ap: Double?
+    let ask_price: Double?
 }
 
-// MARK: - Tradier JSON models (minimal)
-private nonisolated struct TradierQuotesRoot: Decodable {
-    let quotes: TradierQuotesInner?
-}
-private nonisolated struct TradierQuotesInner: Decodable {
-    let quote: TradierQuoteEither
+/// Option contracts list response
+struct APOptionContractsRoot: Codable {
+    let contracts: [APOptionContract]?
 }
 
-private nonisolated enum TradierQuoteEither: Decodable {
-    case one(TradierQuote)
-    case many([TradierQuote])
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.singleValueContainer()
-        if let one = try? container.decode(TradierQuote.self) {
-            self = .one(one)
-            return
-        }
-        if let many = try? container.decode([TradierQuote].self) {
-            self = .many(many)
-            return
-        }
-        throw DecodingError.typeMismatch(TradierQuote.self, .init(codingPath: decoder.codingPath, debugDescription: "Unexpected quote shape"))
-    }
-}
-
-private nonisolated struct TradierQuote: Decodable {
-    let last: Double?
-    let close: Double?
-    let bid: Double?
-    let ask: Double?
-}
-
-private nonisolated struct TradierExpirationsRoot: Decodable {
-    let expirations: TradierExpirations?
-}
-
-private nonisolated struct TradierExpirations: Decodable {
-    let date: [String]?
-}
-
-private nonisolated struct TradierChainsRoot: Decodable {
-    let options: TradierOptions?
-}
-
-private nonisolated struct TradierOptions: Decodable {
-    let option: [TradierOption]?
-}
-
-private nonisolated struct TradierOption: Decodable {
+struct APOptionContract: Codable {
     let symbol: String?
-    let strike: Double?
-    let option_type: String?
-    let bid: Double?
-    let ask: Double?
-    let last: Double?
+    let expiration_date: String?
+    let strike_price: Double?
+    /// "call" or "put"
+    let type: String?
 }
 
+/// Latest option quotes (batched) response
+struct APOptionQuotesLatestRoot: Codable {
+    let quotes: [String: APOptionQuote]?
+}
+
+struct APOptionQuote: Codable {
+    let bid: Double?
+    let ask: Double?
+}
+
+struct APOptionSnapshotsRoot: Codable {
+    let snapshots: [String: APOptionSnapshot]?
+    let next_page_token: String?
+}
+struct APOptionSnapshot: Codable {
+    let latestQuote: APOptionSnapshotQuote?
+}
+
+struct APOptionSnapshotQuote: Codable {
+    let bp: Double?
+    let ap: Double?
+    let bid_price: Double?
+    let ask_price: Double?
+}
 

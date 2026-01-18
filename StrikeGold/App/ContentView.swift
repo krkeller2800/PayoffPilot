@@ -371,6 +371,8 @@ struct ContentView: View {
                 return "Data via Polygon"
             case .tradestation:
                 return "Data via TradeStation"
+            case .alpaca:
+                return "Data via Alpaca"
             }
         }
         return "Delayed data via Yahoo"
@@ -1568,6 +1570,15 @@ struct ContentView: View {
                     appQuoteService = QuoteService(provider: TradeStationProvider(token: token))
                     isUsingCustomProvider = true
                 }
+            case .alpaca:
+                let keyId = KeychainHelper.load(key: KeychainHelper.Keys.alpacaKey) ?? KeychainHelper.load(key: KeychainHelper.Keys.alpacaKeyId)
+                let secret = KeychainHelper.load(key: KeychainHelper.Keys.alpacaSecret)
+                let envString = UserDefaults.standard.string(forKey: "alpacaEnvironment") ?? "paper"
+                let env: AlpacaProvider.Environment = (envString == "live") ? .live : .paper
+                if let keyId = keyId, !keyId.isEmpty, let secret = secret, !secret.isEmpty {
+                    appQuoteService = QuoteService(provider: AlpacaProvider(keyId: keyId, secretKey: secret, environment: env))
+                    isUsingCustomProvider = true
+                }
             }
         }
         if !isUsingCustomProvider {
@@ -1747,7 +1758,7 @@ struct ContentView: View {
 
         // 2) Best-effort fetch for option chain (may be unavailable)
         do {
-            let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: selectedExpiration)
+            let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: selectedExpiration ?? Date())
             await MainActor.run {
                 expirations = filterExpirationsForProviderTZ(chain.expirations)
 
@@ -1856,7 +1867,14 @@ struct ContentView: View {
             fetchError = nil
         }
         do {
-            let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: selectedExpiration)
+            guard let exp = selectedExpiration else {
+                await MainActor.run {
+                    isFetching = false
+                    fetchError = "Please select an expiration."
+                }
+                return
+            }
+            let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: exp)
             await MainActor.run {
                 expirations = filterExpirationsForProviderTZ(chain.expirations)
 
@@ -2051,6 +2069,8 @@ struct ContentView: View {
                 return "quotes via Polygon"
             case .tradestation:
                 return "quotes via TradeStation"
+            case .alpaca:
+                return "quotes via Alpaca"
             }
         }
         return "quotes are delayed via Yahoo"
