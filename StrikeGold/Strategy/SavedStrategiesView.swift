@@ -107,6 +107,7 @@ struct SavedStrategiesView: View {
 @MainActor
 struct SavedStrategyDetailView: View {
     let saved: SavedStrategy
+    @State private var showScenarioSheet = false
 
     private var legs: [OptionLeg] {
         saved.legs.map { leg in
@@ -212,6 +213,20 @@ struct SavedStrategyDetailView: View {
             .padding()
         }
         .navigationTitle("Strategy")
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showScenarioSheet = true
+                } label: {
+                    Label("Scenarios", systemImage: "lightbulb")
+                }
+            }
+        }
+        .sheet(isPresented: $showScenarioSheet) {
+            let center = max(0.01, (saved.marketPriceAtSave ?? legs.map { $0.strike }.sorted().first ?? 100))
+            ScenarioSheetView(symbol: saved.symbol, legs: legs, centerPrice: center)
+                .presentationDetents([.medium, .large])
+        }
     }
 
     private var kindText: String {

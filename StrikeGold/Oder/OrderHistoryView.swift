@@ -324,16 +324,17 @@ private struct OrderRow: View {
 private struct OrderDetailView: View {
     let order: SavedOrder
     
-    @State private var showCloseSheet = false
+    @State private var showCloseSheet: Bool = false
     @State private var closeContract: OptionContract? = nil
     @State private var closeExpirations: [Date] = []
-    @State private var isLoadingClose = false
+    @State private var isLoadingClose: Bool = false
     @State private var loadError: String? = nil
 
     @State private var marketBid: Double? = nil
     @State private var marketAsk: Double? = nil
     @State private var marketMid: Double? = nil
     @State private var underlyingPrice: Double? = nil
+    @State private var showScenarioSheet = false
 
     private func oppositeSide(for side: String) -> PlaceOrderSheet.OrderSide {
         return side.lowercased() == "buy" ? .sell : .buy
@@ -612,6 +613,15 @@ private struct OrderDetailView: View {
         }
         .navigationTitle("\(order.symbol)  \(order.right.rawValue.uppercased())  \(OptionsFormat.number(order.strike))")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    showScenarioSheet = true
+                } label: {
+                    Label("Scenarios", systemImage: "lightbulb")
+                }
+            }
+        }
         .onAppear { loadMarketQuotes() }
         .onReceive(NotificationCenter.default.publisher(for: .orderMonitorHeartbeatDidUpdate)) { _ in
             loadMarketQuotes()
@@ -657,6 +667,22 @@ private struct OrderDetailView: View {
             } else {
                 Text("Unable to load contract to close.")
                     .presentationDetents([.medium])
+            }
+        }
+        .sheet(isPresented: $showScenarioSheet) {
+            if let view = ScenarioSheetView(order: order, underlyingCenter: underlyingPrice, marketMid: marketMid) {
+                view
+                    .presentationDetents([.medium, .large])
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Need more info to compute scenarios.")
+                        .font(.headline)
+                    Text("Provide a fill price or limit, or ensure a market mid is available.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding()
+                .presentationDetents([.medium])
             }
         }
     }

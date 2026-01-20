@@ -68,86 +68,11 @@ final class QuoteService {
     }
 
     func fetchDelayedPrice(symbol: String) async throws -> Double {
-        let trimmed = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw QuoteService.QuoteError.invalidSymbol }
-
-        // 1) Try latest trade price
-        do {
-            let req = try makeRequest(path: "/v2/stocks/trades/latest", queryItems: [
-                URLQueryItem(name: "symbols", value: trimmed.uppercased())
-            ])
-            dlog("[Alpaca] GET \(req.url?.absoluteString ?? "")")
-            let (data, response) = try await URLSession.shared.data(for: req)
-            if let http = response as? HTTPURLResponse {
-                dlog("[Alpaca] /v2/stocks/trades/latest status=\(http.statusCode)")
-                if http.statusCode != 200 {
-                    if let s = String(data: data, encoding: .utf8) { dlog("[Alpaca] trades/latest body: \(s)") }
-                }
-                if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
-                guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
-            }
-            let troot = try JSONDecoder().decode(APLatestStockTradesLatestRoot.self, from: data)
-            if let t = troot.trades?[trimmed.uppercased()], let p = t.p ?? t.price { return p }
-            // Fallback to single-object shape if needed
-            if let sroot = try? JSONDecoder().decode(APLatestStockTradeRoot.self, from: data),
-               let p = sroot.trade?.p ?? sroot.trade?.price { return p }
-        } catch let decErr as DecodingError {
-            dlog("[Alpaca] decode error trades/latest: \(decErr)")
-        } catch let e as QuoteService.QuoteError {
-            if case .unauthorized = e { throw e }
-            // fall through to quote mid on other errors
-        } catch {
-            // fall through
-        }
-
-        // 2) Fallback to latest quote mid
-        let req2 = try makeRequest(path: "/v2/stocks/quotes/latest", queryItems: [
-            URLQueryItem(name: "symbols", value: trimmed.uppercased())
-        ])
-        dlog("[Alpaca] GET \(req2.url?.absoluteString ?? "")")
-        let (data2, response2) = try await URLSession.shared.data(for: req2)
-        if let http = response2 as? HTTPURLResponse {
-            dlog("[Alpaca] /v2/stocks/quotes/latest status=\(http.statusCode)")
-            if http.statusCode != 200 {
-                if let s = String(data: data2, encoding: .utf8) { dlog("[Alpaca] quotes/latest body: \(s)") }
-            }
-            if http.statusCode == 401 || http.statusCode == 403 { throw QuoteService.QuoteError.unauthorized }
-            guard http.statusCode == 200 else { throw QuoteService.QuoteError.network }
-        }
-        // Try batched quotes shape first
-        let qmap = try JSONDecoder().decode(APLatestStockQuotesLatestRoot.self, from: data2)
-        if let q = qmap.quotes?[trimmed.uppercased()] {
-            let bid = q.bp ?? q.bid_price
-            let ask = q.ap ?? q.ask_price
-            if let b = bid, let a = ask, b > 0, a > 0 { return (b + a) / 2 }
-            if let a = ask { return a }
-            if let b = bid { return b }
-        }
-        // Fallback to single-object shape
-        let qroot = try JSONDecoder().decode(APLatestStockQuoteRoot.self, from: data2)
-        let bid = qroot.quote?.bp ?? qroot.quote?.bid_price
-        let ask = qroot.quote?.ap ?? qroot.quote?.ask_price
-        if let b = bid, let a = ask, b > 0, a > 0 { return (b + a) / 2 }
-        if let a = ask { return a }
-        if let b = bid { return b }
-        throw QuoteService.QuoteError.noData
+        return try await provider.fetchDelayedPrice(symbol: symbol)
     }
 
     func fetchOptionChain(symbol: String, expiration: Date) async throws -> OptionChainData {
         return try await provider.fetchOptionChain(symbol: symbol, expiration: expiration)
-    }
-
-    private func makeRequest(path: String, queryItems: [URLQueryItem]) throws -> URLRequest {
-        if let alpacaProvider = provider as? AlpacaProvider {
-            return try alpacaProvider.makeRequest(path: path, queryItems: queryItems)
-        }
-        fatalError("makeRequest is only available for AlpacaProvider")
-    }
-
-    private func dlog(_ message: @autoclosure () -> String) {
-        if let alpacaProvider = provider as? AlpacaProvider {
-            alpacaProvider.dlog(message())
-        }
     }
 }
 

@@ -3,7 +3,7 @@ import Foundation
 actor OrderMonitor {
     static let shared = OrderMonitor()
     
-    private var quotes: QuoteService = QuoteService()
+    private var quotes: QuoteService?
     private var running = false
     private let heartbeatKey = "order_monitor_last_tick"
     
@@ -27,7 +27,6 @@ actor OrderMonitor {
     // Configure quotes on startup from persisted settings
     init() {
         // Build an initial QuoteService asynchronously on the main actor to respect Keychain isolation.
-        self.quotes = QuoteService()
         self.running = false
         // heartbeatKey already initialized by default property value
         Task { @MainActor in
@@ -44,42 +43,13 @@ actor OrderMonitor {
     @MainActor private static func buildInitialQuoteService() -> QuoteService {
         let defaults = UserDefaults.standard
         let last = defaults.string(forKey: "lastEnabledProvider")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        
+#if DEBUG
+        OrderMonitor.sdlog("[OrderMonitor] Attempting to restore provider '\(last)'")
+#endif
 
-        // Attempt to restore a provider-specific QuoteService.
-        switch last {
-        case "Tradier":
-            if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradierToken), !token.isEmpty {
-#if DEBUG
-                OrderMonitor.sdlog("[OrderMonitor] Restoring Tradier provider from Keychain.")
-#endif
-                let provider = TradierProvider(token: token)
-                return QuoteService(provider: provider)
-            }
-        case "Finnhub":
-            if let token = KeychainHelper.load(key: KeychainHelper.Keys.finnhubToken), !token.isEmpty {
-#if DEBUG
-                OrderMonitor.sdlog("[OrderMonitor] Restoring Finnhub provider from Keychain.")
-#endif
-                let provider = FinnhubProvider(token: token)
-                return QuoteService(provider: provider)
-            }
-        case "Polygon":
-            if let token = KeychainHelper.load(key: KeychainHelper.Keys.polygonToken), !token.isEmpty {
-#if DEBUG
-                OrderMonitor.sdlog("[OrderMonitor] Restoring Polygon provider from Keychain.")
-#endif
-                let provider = PolygonProvider(token: token)
-                return QuoteService(provider: provider)
-            }
-        case "TradeStation":
-            if let token = KeychainHelper.load(key: KeychainHelper.Keys.tradestationToken), !token.isEmpty {
-#if DEBUG
-                OrderMonitor.sdlog("[OrderMonitor] Restoring TradeStation provider from Keychain.")
-#endif
-                let provider = TradeStationProvider(token: token)
-                return QuoteService(provider: provider)
-            }
-        case "Alpaca":
+        // Restore Alpaca when explicitly selected and credentials exist
+        if last == "Alpaca" {
             if let keyId = KeychainHelper.load(key: KeychainHelper.Keys.alpacaKeyId),
                let secret = KeychainHelper.load(key: KeychainHelper.Keys.alpacaSecret),
                !keyId.isEmpty, !secret.isEmpty {
@@ -88,15 +58,19 @@ actor OrderMonitor {
 #endif
                 let provider = AlpacaProvider(keyId: keyId, secretKey: secret)
                 return QuoteService(provider: provider)
+            } else {
+#if DEBUG
+                OrderMonitor.sdlog("[OrderMonitor] Alpaca provider selected but tokens missing or empty. Falling back to Manual provider.")
+#endif
             }
-        default:
-            break
         }
 
+        // Default: Manual mode is the baseline. If last is "Manual" or empty/unknown, use ManualDataProvider.
 #if DEBUG
-        OrderMonitor.sdlog("[OrderMonitor] No persisted provider to restore or token missing. Using default QuoteService().")
+        let label = last.isEmpty ? "default" : last
+        OrderMonitor.sdlog("[OrderMonitor] Using ManualDataProvider for provider '\(label)'.")
 #endif
-        return QuoteService()
+        return QuoteService(provider: ManualDataProvider.shared)
     }
     
     func setQuoteService(_ svc: QuoteService?) {
@@ -104,12 +78,12 @@ actor OrderMonitor {
         if svc != nil {
             dlog("[OrderMonitor] setQuoteService called with NON-NIL QuoteService")
         } else {
-            dlog("[OrderMonitor] setQuoteService called with NIL QuoteService (will use default)")
+            dlog("[OrderMonitor] setQuoteService called with NIL QuoteService (quotes will be unset until configured)")
         }
 #endif
-        self.quotes = svc ?? QuoteService()
+        self.quotes = svc
 #if DEBUG
-        dlog("[OrderMonitor] setQuoteService completed. quotes now set.")
+        dlog("[OrderMonitor] setQuoteService completed. quotes now set? \(self.quotes != nil)")
 #endif
     }
     
@@ -140,6 +114,19 @@ actor OrderMonitor {
         )
     }
     
+    private func ensureQuoteService() async -> QuoteService {
+        if let svc = self.quotes {
+            return svc
+        }
+        // Build on the main actor to respect any main-actor isolation in QuoteService
+        let svc = await MainActor.run { OrderMonitor.buildInitialQuoteService() }
+        self.quotes = svc
+#if DEBUG
+        dlog("[OrderMonitor] ensureQuoteService created and set a new QuoteService on main actor.")
+#endif
+        return svc
+    }
+    
     private func loop() async {
         while running {
             await tick()
@@ -167,7 +154,8 @@ actor OrderMonitor {
 #endif
             
             do {
-                let chain = try await quotes.fetchOptionChain(symbol: ord.symbol, expiration: exp)
+                let svc = await ensureQuoteService()
+                let chain = try await svc.fetchOptionChain(symbol: ord.symbol, expiration: exp)
                 let contracts: [OptionContract]
                 if ord.right == .call {
                     contracts = chain.callContracts
@@ -258,7 +246,8 @@ actor OrderMonitor {
         dlog("[OrderMonitor] fetchMarketReferences symbol=\(symbol) exp=\(expLog) isCall=\(isCall) strike=\(strike)")
 #endif
         
-        let chain = try await quotes.fetchOptionChain(symbol: symbol, expiration: expiration)
+        let svc = await ensureQuoteService()
+        let chain = try await svc.fetchOptionChain(symbol: symbol, expiration: expiration)
         
 #if DEBUG
         let countCalls = chain.callContracts.count
@@ -309,7 +298,8 @@ actor OrderMonitor {
     
     /// Fetch the current underlying price for the given symbol using the monitor's QuoteService.
     func fetchUnderlyingPrice(symbol: String) async throws -> Double {
-        return try await quotes.fetchDelayedPrice(symbol: symbol)
+        let svc = await ensureQuoteService()
+        return try await svc.fetchDelayedPrice(symbol: symbol)
     }
 }
 

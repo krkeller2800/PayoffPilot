@@ -13,6 +13,7 @@ import Combine
 @MainActor
 final class SettingsViewModel: ObservableObject {
     enum BYOProvider: String, CaseIterable, Identifiable {
+        case manual = "Manual"
         case tradier = "Tradier"
         case finnhub = "Finnhub"
         case polygon = "Polygon"
@@ -37,7 +38,7 @@ final class SettingsViewModel: ObservableObject {
     @Published var alpacaKeyId: String = ""
     @Published var alpacaSecret: String = ""
 
-    @Published var selectedProvider: BYOProvider = .tradier
+    @Published var selectedProvider: BYOProvider = .manual
 
     // UI state
     @Published private(set) var isValidating: Bool = false
@@ -49,6 +50,62 @@ final class SettingsViewModel: ObservableObject {
         didSet {
             Task { await OrderMonitor.shared.setQuoteService(quoteService) }
         }
+    }
+
+    /// True when Alpaca is currently the active provider or credentials are present.
+    var isAlpacaActive: Bool {
+        let last = UserDefaults.standard.string(forKey: "lastEnabledProvider")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return last == BYOProvider.alpaca.rawValue
+    }
+
+    /// True when Manual mode is the currently active provider
+    var isManualActive: Bool {
+        let last = UserDefaults.standard.string(forKey: "lastEnabledProvider")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return last == BYOProvider.manual.rawValue
+    }
+
+    /// True when any provider is currently active (Manual or Alpaca)
+    var isProviderEnabled: Bool { isManualActive || isAlpacaActive }
+
+    /// The currently active provider restored from persisted settings, if any.
+    var activeProvider: BYOProvider? {
+        let last = UserDefaults.standard.string(forKey: "lastEnabledProvider")?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return BYOProvider(rawValue: last)
+    }
+
+    /// Convenience to get the active provider display name.
+    var activeProviderName: String? { activeProvider?.rawValue }
+
+    /// Returns true if we have stored credentials for the given provider (Manual always true).
+    func hasStoredCredentials(for provider: BYOProvider) -> Bool {
+        switch provider {
+        case .manual:
+            return true
+        case .tradier:
+            if let tok = KeychainHelper.load(key: KeychainHelper.Keys.tradierToken) { return !tok.isEmpty }
+            return false
+        case .finnhub:
+            if let tok = KeychainHelper.load(key: KeychainHelper.Keys.finnhubToken) { return !tok.isEmpty }
+            return false
+        case .polygon:
+            if let tok = KeychainHelper.load(key: KeychainHelper.Keys.polygonToken) { return !tok.isEmpty }
+            return false
+        case .tradestation:
+            if let tok = KeychainHelper.load(key: KeychainHelper.Keys.tradestationToken) { return !tok.isEmpty }
+            return false
+        case .alpaca:
+            return hasAlpacaCredentials
+        }
+    }
+
+    /// True when Alpaca credentials exist in Keychain (used to treat restored sessions as validated for display)
+    var hasAlpacaCredentials: Bool {
+        if let keyId = KeychainHelper.load(key: KeychainHelper.Keys.alpacaKeyId),
+           let secret = KeychainHelper.load(key: KeychainHelper.Keys.alpacaSecret),
+           !keyId.isEmpty, !secret.isEmpty {
+            return true
+        }
+        return false
     }
 
     init() {
@@ -454,27 +511,44 @@ final class SettingsViewModel: ObservableObject {
     /// Save the token for the currently selected provider.
     func saveSelected() {
         switch selectedProvider {
-        case .tradier: saveToken()
-        case .finnhub: saveFinnhubToken()
-        case .polygon: savePolygonToken()
-        case .tradestation: saveTradeStationToken()
-        case .alpaca: saveAlpacaCredentials()
+        case .manual:
+            statusMessage = "Manual mode doesn't require saving."
+        case .tradier:
+            saveToken()
+        case .finnhub:
+            saveFinnhubToken()
+        case .polygon:
+            savePolygonToken()
+        case .tradestation:
+            saveTradeStationToken()
+        case .alpaca:
+            saveAlpacaCredentials()
         }
     }
     /// Clear the token for the currently selected provider.
     func clearSelected() {
         switch selectedProvider {
-        case .tradier: clearToken()
-        case .finnhub: clearFinnhubToken()
-        case .polygon: clearPolygonToken()
-        case .tradestation: clearTradeStationToken()
-        case .alpaca: clearAlpacaCredentials()
+            case .manual:
+                statusMessage = "Manual mode has nothing to clear."
+            case .tradier:
+                clearToken()
+            case .finnhub:
+                clearFinnhubToken()
+            case .polygon:
+                clearPolygonToken()
+            case .tradestation:
+                clearTradeStationToken()
+            case .alpaca:
+                clearAlpacaCredentials()
         }
     }
 
     /// Validate the token for the currently selected provider.
     func validateSelected() async {
         switch selectedProvider {
+        case .manual:
+            validationSucceeded = true
+            statusMessage = "Manual mode requires no validation."
         case .tradier:
             await validateToken()
         case .finnhub:
@@ -491,6 +565,8 @@ final class SettingsViewModel: ObservableObject {
     /// Enable the provider corresponding to the current selection.
     func enableSelected() {
         switch selectedProvider {
+        case .manual:
+            enableManual()
         case .tradier:
             enableProvider()
         case .finnhub:
@@ -508,6 +584,8 @@ final class SettingsViewModel: ObservableObject {
     /// Saves token (if applicable), validates with a lightweight call, then enables and sets lastEnabledProvider.
     func connectSelected() async {
         switch selectedProvider {
+        case .manual:
+            enableManual()
         case .tradier:
             await connectTradier()
         case .finnhub:
@@ -519,6 +597,16 @@ final class SettingsViewModel: ObservableObject {
         case .alpaca:
             await connectAlpaca()
         }
+    }
+
+    /// Enable manual mode (no external provider). Uses the ManualDataProvider so user-entered data flows everywhere.
+    func enableManual() {
+        let provider = ManualDataProvider.shared
+        let svc = QuoteService(provider: provider)
+        quoteService = svc
+        validationSucceeded = true
+        statusMessage = "Manual mode enabled."
+        UserDefaults.standard.set(BYOProvider.manual.rawValue, forKey: "lastEnabledProvider")
     }
 
     /// Connect helper for Tradier (manual token path).
@@ -637,7 +725,7 @@ final class SettingsViewModel: ObservableObject {
     }
 
     /// Connect helper for Alpaca.
-    private func connectAlpaca() async {
+    func connectAlpaca() async {
         let key = alpacaKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let secret = alpacaSecretKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else {

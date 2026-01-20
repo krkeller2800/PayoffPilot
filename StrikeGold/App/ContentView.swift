@@ -252,7 +252,18 @@ struct ContentView: View {
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         HStack(spacing: 12) {
-                            Button { showSettings = true } label: { Image(systemName: "gearshape") }
+                            Button {
+                                #if canImport(UIKit)
+                                DispatchQueue.main.async {
+                                    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                                }
+                                #endif
+                                DispatchQueue.main.async {
+                                    showSettings = true
+                                }
+                            } label: {
+                                Image(systemName: "gearshape")
+                            }
                             #if DEBUG
                             Toggle(isOn: $debugLogsEnabled) { Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug") }
                                 .toggleStyle(.switch)
@@ -266,11 +277,18 @@ struct ContentView: View {
                 Task { onLookup() }
                 rebuildProviderFromStorage()
             }
-            .sheet(isPresented: $showSettings, onDismiss: {
-                rebuildProviderFromStorage()
-                Task { onLookup() }
-            }) {
+            .sheet(isPresented: $showSettings) {
                 SettingsView()
+            }
+            .onChange(of: showSettings) { oldValue, newValue in
+                if oldValue == true && newValue == false {
+                    DispatchQueue.main.async {
+                        rebuildProviderFromStorage()
+                        Task { @MainActor in
+                            onLookup()
+                        }
+                    }
+                }
             }
             .sheet(isPresented: $showOrders) {
                 OrderHistoryView()
@@ -373,6 +391,10 @@ struct ContentView: View {
                 return "Data via TradeStation"
             case .alpaca:
                 return "Data via Alpaca"
+            case .manual:
+                return "Data was manually added"
+            @unknown default:
+                return "Delayed data via Yahoo"
             }
         }
         return "Delayed data via Yahoo"
@@ -424,7 +446,128 @@ struct ContentView: View {
                             #if canImport(UIKit)
                             UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                             #endif
-                            Task { await lookupSymbol() }
+
+                            let trimmed = symbolText.trimmingCharacters(in: .whitespacesAndNewlines)
+                            guard !trimmed.isEmpty else {
+                                fetchError = "Enter a symbol to fetch a price."
+                                return
+                            }
+
+                            Task {
+                                await MainActor.run { isFetching = true; fetchError = nil }
+                                do {
+                                    let price = try await appQuoteService.fetchDelayedPrice(symbol: trimmed)
+                                    await MainActor.run {
+                                        underlyingNowText = OptionsFormat.number(price)
+                                        expirySpot = price
+                                        lastRefresh = Date()
+                                        isFetching = false
+                                        fetchError = nil
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        if !trimmed.isEmpty {
+                                            fetchError = (error as? LocalizedError)?.errorDescription ?? "Price refresh failed."
+                                        }
+                                        isFetching = false
+                                    }
+                                }
+
+                                // Also fetch option chain after price refresh
+                                do {
+                                    let chain = try await appQuoteService.fetchOptionChain(symbol: trimmed, expiration: selectedExpiration ?? Date())
+                                    await MainActor.run {
+                                        expirations = filterExpirationsForProviderTZ(chain.expirations)
+
+                                        #if DEBUG
+                                        let rawCount = chain.expirations.count
+                                        let filteredCount = filterExpirationsForProviderTZ(chain.expirations).count
+                                        dlog("[DEBUG][ContentView] Expirations raw=\(rawCount), filtered(Eastern today+)=\(filteredCount)")
+                                        if let firstRaw = chain.expirations.first {
+                                            dlog("[DEBUG][ContentView] First raw expiration: \(firstRaw.formatted(date: .abbreviated, time: .omitted))")
+                                        }
+                                        if let firstFiltered = expirations.first {
+                                            dlog("[DEBUG][ContentView] First filtered expiration: \(firstFiltered.formatted(date: .abbreviated, time: .omitted))")
+                                        }
+                                        #endif
+                                        if expirations.isEmpty && fetchError == nil {
+                                            fetchError = "Option chain unavailable (no expirations)."
+                                        }
+
+                                        callStrikes = chain.callStrikes
+                                        putStrikes = chain.putStrikes
+                                        cachedCallContracts = chain.callContracts
+                                        cachedPutContracts  = chain.putContracts
+
+                                        callMenuStrikeWidth = cachedCallContracts.map { OptionsFormat.number($0.strike).count }.max() ?? 0
+                                        putMenuStrikeWidth  = cachedPutContracts.map  { OptionsFormat.number($0.strike).count }.max() ?? 0
+
+                                        #if DEBUG
+                                        let pricedCalls = cachedCallContracts.filter { $0.bid != nil || $0.ask != nil || $0.last != nil }
+                                        let pricedPuts  = cachedPutContracts.filter  { $0.bid != nil || $0.ask != nil || $0.last != nil }
+                                        dlog("[DEBUG][ContentView] Cached contracts -> calls: \(cachedCallContracts.count) (priced: \(pricedCalls.count)), puts: \(cachedPutContracts.count) (priced: \(pricedPuts.count))")
+                                        if let c0 = cachedCallContracts.first {
+                                            dlog("[DEBUG][ContentView] Sample call: strike=\(c0.strike) bid=\(String(describing: c0.bid)) ask=\(String(describing: c0.ask)) last=\(String(describing: c0.last)) mid=\(String(describing: c0.mid))")
+                                        }
+                                        if let p0 = cachedPutContracts.first {
+                                            dlog("[DEBUG][ContentView] Sample put: strike=\(p0.strike) bid=\(String(describing: p0.bid)) ask=\(String(describing: p0.ask)) last=\(String(describing: p0.last)) mid=\(String(describing: p0.mid))")
+                                        }
+                                        #endif
+
+                                        // Auto-select near-the-money strikes and contracts ONLY if an expiration is selected
+                                        if selectedExpiration != nil {
+                                            let price = Double(underlyingNowText) ?? expirySpot
+                                            if strategy == .singleCall {
+                                                if let s = nearestStrike(to: price, in: callStrikes) {
+                                                    selectedCallStrike = s
+                                                    strikeText = OptionsFormat.number(s)
+                                                    selectedCallContract = cachedCallContracts.first(where: { $0.strike == s })
+                                                    if useMarketPremium, let mid = selectedCallContract?.mid {
+                                                        premiumText = OptionsFormat.number(mid)
+                                                    }
+                                                }
+                                            } else if strategy == .singlePut {
+                                                if let s = nearestStrike(to: price, in: putStrikes) {
+                                                    selectedPutStrike = s
+                                                    strikeText = OptionsFormat.number(s)
+                                                    selectedPutContract = cachedPutContracts.first(where: { $0.strike == s })
+                                                    if useMarketPremium, let mid = selectedPutContract?.mid {
+                                                        premiumText = OptionsFormat.number(mid)
+                                                    }
+                                                }
+                                            } else {
+                                                // Bull Call Spread: choose lower ~ATM and upper next higher if available
+                                                if let lower = nearestStrike(to: price, in: callStrikes) {
+                                                    selectedCallStrike = lower
+                                                    strikeText = OptionsFormat.number(lower)
+                                                    selectedCallContract = cachedCallContracts.first(where: { $0.strike == lower })
+                                                    if useMarketPremium, let mid = selectedCallContract?.mid {
+                                                        premiumText = OptionsFormat.number(mid)
+                                                    }
+                                                    let upper = nextHigherStrike(after: lower, in: callStrikes) ?? lower
+                                                    selectedPutStrike = upper
+                                                    selectedPutContract = cachedCallContracts.first(where: { $0.strike == upper })
+                                                    shortCallStrikeText = OptionsFormat.number(upper)
+                                                    if useMarketPremium, let mid = selectedPutContract?.mid {
+                                                        shortCallPremiumText = OptionsFormat.number(mid)
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        isFetching = false
+                                    }
+                                } catch {
+                                    await MainActor.run {
+                                        if case QuoteService.QuoteError.unauthorized = error {
+                                            clearOptionInputsForUnavailableChain()
+                                        }
+                                        if !trimmed.isEmpty {
+                                            fetchError = (error as? LocalizedError)?.errorDescription ?? "Chain fetch failed."
+                                        }
+                                        isFetching = false
+                                    }
+                                }
+                            }
                         } label: {
                             if isFetching { ProgressView() } else { Text("Lookup") }
                         }
@@ -508,19 +651,27 @@ struct ContentView: View {
                     labeledTextField("Market Price", text: $underlyingNowText, keyboardType: PPKeyboardType.decimalPad)
 
                     Button {
+                        let trimmed = symbolText.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !trimmed.isEmpty else {
+                            fetchError = "Enter a symbol to fetch a price."
+                            return
+                        }
                         Task {
-                            await MainActor.run { isFetching = true }
+                            await MainActor.run { isFetching = true; fetchError = nil }
                             do {
-                                let price = try await appQuoteService.fetchDelayedPrice(symbol: symbolText)
+                                let price = try await appQuoteService.fetchDelayedPrice(symbol: trimmed)
                                 await MainActor.run {
                                     underlyingNowText = OptionsFormat.number(price)
                                     expirySpot = price
                                     lastRefresh = Date()
                                     isFetching = false
+                                    fetchError = nil
                                 }
                             } catch {
                                 await MainActor.run {
-                                    fetchError = (error as? LocalizedError)?.errorDescription ?? "Price refresh failed."
+                                    if !trimmed.isEmpty {
+                                        fetchError = (error as? LocalizedError)?.errorDescription ?? "Price refresh failed."
+                                    }
                                     isFetching = false
                                 }
                             }
@@ -1542,6 +1693,7 @@ struct ContentView: View {
 
     // Rebuild/refresh the provider-related state from persisted storage.
     // Minimal implementation to satisfy compile-time references without external dependencies.
+    @MainActor
     private func rebuildProviderFromStorage() {
         #if DEBUG
         dlog("[DEBUG][ContentView] Rebuilding provider from storage…")
@@ -1579,6 +1731,12 @@ struct ContentView: View {
                     appQuoteService = QuoteService(provider: AlpacaProvider(keyId: keyId, secretKey: secret, environment: env))
                     isUsingCustomProvider = true
                 }
+            case .manual:
+                // Manual mode: use local, user-entered data provider
+                appQuoteService = QuoteService(provider: ManualDataProvider.shared)
+                isUsingCustomProvider = true
+            @unknown default:
+                break
             }
         }
         if !isUsingCustomProvider {
@@ -1742,9 +1900,18 @@ struct ContentView: View {
     private func lookupSymbol() async {
         await MainActor.run { isFetching = true; fetchError = nil }
 
+        let trimmed = symbolText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            await MainActor.run {
+                fetchError = "Enter a symbol to fetch a price."
+                isFetching = false
+            }
+            return
+        }
+
         // 1) Fetch price first so underlying is shown even if chain fails
         do {
-            let price = try await appQuoteService.fetchDelayedPrice(symbol: symbolText)
+            let price = try await appQuoteService.fetchDelayedPrice(symbol: trimmed)
             await MainActor.run {
                 underlyingNowText = OptionsFormat.number(price)
                 expirySpot = price
@@ -1752,13 +1919,15 @@ struct ContentView: View {
             }
         } catch {
             await MainActor.run {
-                fetchError = (error as? LocalizedError)?.errorDescription ?? "Price refresh failed."
+                if !trimmed.isEmpty {
+                    fetchError = (error as? LocalizedError)?.errorDescription ?? "Price refresh failed."
+                }
             }
         }
 
         // 2) Best-effort fetch for option chain (may be unavailable)
         do {
-            let chain = try await appQuoteService.fetchOptionChain(symbol: symbolText, expiration: selectedExpiration ?? Date())
+            let chain = try await appQuoteService.fetchOptionChain(symbol: trimmed, expiration: selectedExpiration ?? Date())
             await MainActor.run {
                 expirations = filterExpirationsForProviderTZ(chain.expirations)
 
@@ -1852,7 +2021,7 @@ struct ContentView: View {
                 if case QuoteService.QuoteError.unauthorized = error {
                     clearOptionInputsForUnavailableChain()
                 }
-                if fetchError == nil {
+                if !trimmed.isEmpty {
                     fetchError = (error as? LocalizedError)?.errorDescription ?? "Chain fetch failed."
                 }
             }
@@ -2071,6 +2240,10 @@ struct ContentView: View {
                 return "quotes via TradeStation"
             case .alpaca:
                 return "quotes via Alpaca"
+            case .manual:
+                return "Data was manually added"
+            @unknown default:
+                return "quotes are delayed via Yahoo"
             }
         }
         return "quotes are delayed via Yahoo"
