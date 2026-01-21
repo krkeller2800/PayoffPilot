@@ -2,6 +2,7 @@ import SwiftUI
 import Combine
 
 struct OrderHistoryView: View {
+    @Environment(\.dismiss) private var dismiss
     @State private var orders: [SavedOrder] = []
     @State private var showExpiringSoonOnly: Bool = false
     @State private var lastHeartbeat: Date? = nil
@@ -110,6 +111,13 @@ struct OrderHistoryView: View {
                         }
                     }
                 }
+#if DEBUG
+                Section("Debug") {
+                    Toggle(isOn: $debugLogsEnabled) {
+                        Label("Debug Logs", systemImage: debugLogsEnabled ? "ladybug.fill" : "ladybug")
+                    }
+                }
+#endif
             }
             .refreshable {
                 let loaded = await OrderStore.shared.load()
@@ -120,20 +128,11 @@ struct OrderHistoryView: View {
             }
             .navigationTitle("Orders")
             .toolbar {
-#if DEBUG
                 ToolbarItem(placement: .topBarTrailing) {
-                    Toggle(isOn: $debugLogsEnabled) {
-                        Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug")
+                    Button("Done") {
+                        dismiss()
                     }
-                    .toggleStyle(.switch)
                 }
-#endif
-//                ToolbarItem(placement: .topBarLeading) {
-//                    Toggle(isOn: $showExpiringSoonOnly) {
-//                        Text("Expiring soon")
-//                    }
-//                    .toggleStyle(.switch)
-//                }
             }
             .safeAreaInset(edge: .bottom) {
                 OrderStatusFooter(orders: orders, monitoringStale: monitoringStale, lastHeartbeat: lastHeartbeat, totalNetPremium: totalNetPremium)
@@ -417,7 +416,7 @@ private struct OrderDetailView: View {
                 }()
                 let midText = midComputed.map { formatMoney($0) } ?? "—"
 
-                GroupBox("Summary") {
+                GroupBox("\(order.symbol)  \(order.right.rawValue.uppercased())  \(OptionsFormat.number(order.strike))") {
                     VStack(alignment: .leading, spacing: 8) {
                         LabeledContent("Symbol", value: order.symbol)
                         LabeledContent("Right", value: order.right.rawValue.capitalized)
@@ -611,15 +610,18 @@ private struct OrderDetailView: View {
             .padding(.horizontal)
             .padding(.vertical, 12)
         }
-        .navigationTitle("\(order.symbol)  \(order.right.rawValue.uppercased())  \(OptionsFormat.number(order.strike))")
-        .navigationBarTitleDisplayMode(.inline)
+        .navigationTitle("Summary")
+//        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     showScenarioSheet = true
                 } label: {
-                    Label("Scenarios", systemImage: "lightbulb")
-                }
+                    HStack(spacing: 4) {
+                        Image(systemName: "lightbulb")
+                            .imageScale(.small)
+                        Text("Scenarios")
+                    }                }
             }
         }
         .onAppear { loadMarketQuotes() }
@@ -672,7 +674,7 @@ private struct OrderDetailView: View {
         .sheet(isPresented: $showScenarioSheet) {
             if let view = ScenarioSheetView(order: order, underlyingCenter: underlyingPrice, marketMid: marketMid) {
                 view
-                    .presentationDetents([.medium, .large])
+                    .presentationDetents([.large, .large])
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Need more info to compute scenarios.")

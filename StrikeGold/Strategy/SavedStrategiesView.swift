@@ -1,107 +1,94 @@
-//
-//  SavedStrategiesView.swift
-//  StrikeGold
-//
-//  Created by Assistant on 1/8/26.
-//
 import SwiftUI
+import Foundation
 import Charts
-#if canImport(UIKit)
-import UIKit
-#endif
 
 struct SavedStrategiesView: View {
     @State private var strategies: [SavedStrategy] = []
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
-        List {
-            if strategies.isEmpty {
-                Section {
-                    VStack(alignment: .center, spacing: 8) {
-                        Image(systemName: "tray")
-                            .font(.largeTitle)
-                            .foregroundStyle(.secondary)
-                        Text("No saved strategies yet")
-                            .font(.headline)
-                        Text("Pull to refresh or tap the tray icon in the main screen to save your current setup.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 40)
-                }
-            }
-            ForEach(strategies) { s in
-                NavigationLink(destination: SavedStrategyDetailView(saved: s)) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(title(for: s))
-                                .font(.headline)
-                            Text(subtitle(for: s))
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+        NavigationStack {
+            Group {
+                if strategies.isEmpty {
+                    Text("No saved strategies")
+                        .foregroundColor(.secondary)
+                        .font(.title3)
+                        .multilineTextAlignment(.center)
+                        .padding()
+                } else {
+                    List {
+                        ForEach(strategies) { strategy in
+                            NavigationLink {
+                                SavedStrategyDetailView(saved: strategy)
+                            } label: {
+                                VStack(alignment: .leading) {
+                                    HStack {
+                                        Text(strategy.symbol)
+                                            .font(.headline)
+                                        Spacer()
+                                        Text(Self.displayName(for: strategy.kind))
+                                            .font(.subheadline)
+                                            .foregroundColor(.secondary)
+                                        Spacer()
+                                        Text(strategy.expiration.map { Self.dateFormatter.string(from: $0) } ?? "—")
+                                            .font(.subheadline)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    Text(Self.createdAtFormatter.string(from: strategy.createdAt))
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+                                .padding(.vertical, 4)
+                            }
                         }
-                        Spacer()
-                        if let exp = s.expiration {
-                            Text(exp.formatted(date: .abbreviated, time: .omitted))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
+                        .onDelete(perform: delete)
                     }
-                    .padding(.vertical, 4)
+                    .listStyle(.insetGrouped)
                 }
-                .swipeActions(edge: .trailing) {
-                    Button(role: .destructive) {
-                        delete(id: s.id)
-                    } label: {
-                        Label("Delete", systemImage: "trash")
+            }
+            .navigationTitle("Saved Strategies")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        dismiss()
                     }
                 }
             }
-        }
-        .refreshable { reload() }
-        .navigationTitle("Saved")
-        .task {
-            if strategies.isEmpty {
-                reload()
+            .task {
+                strategies = StrategyStore.shared.load()
             }
         }
     }
 
-    private func reload() {
-        strategies = StrategyStore.shared.load().sorted(by: { $0.createdAt > $1.createdAt })
+    private func delete(at offsets: IndexSet) {
+        for index in offsets {
+            let id = strategies[index].id
+            StrategyStore.shared.remove(id: id)
+        }
+        strategies.remove(atOffsets: offsets)
     }
 
-    private func delete(id: UUID) {
-        StrategyStore.shared.remove(id: id)
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 80_000_000) // ~0.08s to avoid racing navigation transitions
-            reload()
+    private static func displayName(for kind: SavedStrategy.Kind) -> String {
+        switch kind {
+        case .singleCall: return "Single Call"
+        case .singlePut: return "Single Put"
+        case .bullCallSpread: return "Bull Call Spread"
+        case .bullPutSpread: return "Bull Put Spread"
         }
     }
 
-    private func title(for s: SavedStrategy) -> String {
-        let kind: String
-        switch s.kind {
-        case .singleCall: kind = "Call"
-        case .singlePut: kind = "Put"
-        case .bullCallSpread: kind = "Bull Call Spread"
-        }
-        return "\(s.symbol) • \(kind)"
-    }
+    private static let dateFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .medium
+        return df
+    }()
 
-    private func subtitle(for s: SavedStrategy) -> String {
-        var parts: [String] = []
-        if let first = s.legs.first {
-            parts.append("K=\(OptionsFormat.number(first.strike))")
-        }
-        if s.kind == .bullCallSpread, s.legs.count >= 2 {
-            let upper = s.legs[1]
-            parts.append("K2=\(OptionsFormat.number(upper.strike))")
-        }
-        parts.append("Saved \(s.createdAt.formatted(date: .abbreviated, time: .shortened))")
-        return parts.joined(separator: " • ")
-    }
+    private static let createdAtFormatter: DateFormatter = {
+        let df = DateFormatter()
+        df.dateStyle = .short
+        df.timeStyle = .short
+        return df
+    }()
 }
 
 @MainActor
@@ -154,16 +141,19 @@ struct SavedStrategyDetailView: View {
             VStack(alignment: .leading, spacing: 16) {
                 GroupBox("Overview") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("\(saved.symbol)")
-                            .font(.headline)
                         HStack(spacing: 8) {
+                            Text("\(saved.symbol)")
+                                .font(.subheadline)
                             Text(kindText)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
                             if let exp = saved.expiration {
                                 Text("• Expires \(exp.formatted(date: .abbreviated, time: .omitted))")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
                             }
                         }
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+
                     }
                 }
 
@@ -218,14 +208,20 @@ struct SavedStrategyDetailView: View {
                 Button {
                     showScenarioSheet = true
                 } label: {
-                    Label("Scenarios", systemImage: "lightbulb")
+                    HStack(spacing: 4) {
+                        Image(systemName: "lightbulb")
+                            .imageScale(.small)
+                        Text("Scenarios")
+                    }
                 }
+                .accessibilityLabel("Scenario Analysis")
+                .help("Open scenario analysis")
             }
         }
         .sheet(isPresented: $showScenarioSheet) {
             let center = max(0.01, (saved.marketPriceAtSave ?? legs.map { $0.strike }.sorted().first ?? 100))
             ScenarioSheetView(symbol: saved.symbol, legs: legs, centerPrice: center)
-                .presentationDetents([.medium, .large])
+                .presentationDetents([.large, .large])
         }
     }
 
@@ -234,6 +230,7 @@ struct SavedStrategyDetailView: View {
         case .singleCall: return "Call"
         case .singlePut: return "Put"
         case .bullCallSpread: return "Bull Call Spread"
+        case .bullPutSpread: return "Bull Put Spread"
         }
     }
 

@@ -36,12 +36,21 @@ struct ScenarioSheetView: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(symbol)
                 .font(.headline)
-            Text("Assumes underlying moves ±\(Int(upMovePct * 100))% from center price.")
+            Text("Let’s imagine two simple endings at expiration:")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+//                .foregroundStyle(.secondary)
+            Text("• Price rises to \(OptionsFormat.money(upPrice))")
+                .font(.caption2)
+//                .foregroundStyle(.secondary)
+            Text("• Price falls to \(OptionsFormat.money(downPrice))")
+                .font(.caption2)
+//                .foregroundStyle(.secondary)
+            Text("These are simplified walk‑throughs. No fees or early assignment considered.")
+                .font(.caption2)
+//                .foregroundStyle(.secondary)
         }
     }
 
@@ -68,11 +77,14 @@ struct ScenarioSheetView: View {
     }
 
     private func label(for a: ScenarioResult, other b: ScenarioResult) -> String {
-        if a.totalPL > 0 && b.totalPL <= 0 { return "Money-making scenario" }
-        if a.totalPL <= 0 && b.totalPL > 0 { return "Money-losing scenario" }
-        if a.totalPL > b.totalPL { return "More profitable scenario" }
-        if a.totalPL < b.totalPL { return "Less profitable scenario" }
-        return "Scenario"
+        let direction = a.underlying >= centerPrice ? "If price rises to \(OptionsFormat.money(a.underlying))" : "If price falls to \(OptionsFormat.money(a.underlying))"
+        let qualifier: String
+        if a.totalPL > 0 && b.totalPL <= 0 { qualifier = " • likely profit" }
+        else if a.totalPL < 0 && b.totalPL >= 0 { qualifier = " • likely loss" }
+        else if a.totalPL > b.totalPL { qualifier = " • better outcome" }
+        else if a.totalPL < b.totalPL { qualifier = " • worse outcome" }
+        else { qualifier = "" }
+        return direction + qualifier
     }
 
     private func scenarioSection(title: String, result: ScenarioResult) -> some View {
@@ -89,20 +101,30 @@ struct ScenarioSheetView: View {
                 }
                 .accessibilityLabel("Total P and L \(result.totalPL >= 0 ? "profit" : "loss") \(OptionsFormat.money(abs(result.totalPL)))")
 
-                VStack(alignment: .leading, spacing: 8) {
+                VStack(alignment: .leading, spacing: 10) {
                     ForEach(Array(result.legs.enumerated()), id: \.offset) { idx, leg in
-                        VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 6) {
                             Text(leg.title)
                                 .font(.subheadline)
-                            Text(leg.intrinsicExplanation)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            Text(leg.perShareExplanation)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            Text(leg.legPLExplanation)
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                            if let first = leg.narrativeLines.first {
+                                Text(first)
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if leg.narrativeLines.count > 1 {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    ForEach(Array(leg.narrativeLines.dropFirst()), id: \.self) { line in
+                                        HStack(alignment: .top, spacing: 6) {
+                                            Text("•")
+                                                .font(.footnote)
+                                                .foregroundStyle(.secondary)
+                                            Text(line)
+                                                .font(.footnote)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
                         }
                         if idx < result.legs.count - 1 {
                             Divider().opacity(0.4)
@@ -142,29 +164,55 @@ struct ScenarioSheetView: View {
             let perSharePL = (side == .long) ? rawPerShare : -rawPerShare
             let legPL = perSharePL * Double(qty) * mult
 
-            let legTitle = "\(side == .long ? "Long" : "Short") \(type == .call ? "Call" : "Put")  K=\(OptionsFormat.number(K))  Prem=\(OptionsFormat.number(prem))  ×\(qty)"
+            let legTitle: String = {
+                let sideText = (side == .long) ? "Long" : "Short"
+                let typeText = (type == .call) ? "Call" : "Put"
+                return "\(sideText) \(typeText) — strike \(OptionsFormat.number(K)), premium \(OptionsFormat.number(prem)), ×\(qty)"
+            }()
 
-            let intrinsicExpl = {
-                switch type {
-                case .call:
-                    return "Intrinsic = max(0, S − K) = max(0, \(OptionsFormat.number(underlying)) − \(OptionsFormat.number(K))) = \(OptionsFormat.number(intrinsicPerShare))"
-                case .put:
-                    return "Intrinsic = max(0, K − S) = max(0, \(OptionsFormat.number(K)) − \(OptionsFormat.number(underlying))) = \(OptionsFormat.number(intrinsicPerShare))"
+            var lines: [String] = []
+            // Opening: set the scene
+            lines.append("If \(symbol) finishes around \(OptionsFormat.money(underlying)):")
+
+            switch (side, type) {
+            case (.long, .call):
+                if intrinsicPerShare > 0 {
+                    lines.append("Your right to buy at \(OptionsFormat.money(K)) would be worth about \(OptionsFormat.number(intrinsicPerShare)) per share.")
+                } else {
+                    lines.append("This call would likely expire worthless because the price is below \(OptionsFormat.money(K)).")
                 }
-            }()
+                lines.append("You paid about \(OptionsFormat.number(prem)) per share for this option.")
+            case (.long, .put):
+                if intrinsicPerShare > 0 {
+                    lines.append("Your right to sell at \(OptionsFormat.money(K)) would be worth about \(OptionsFormat.number(intrinsicPerShare)) per share.")
+                } else {
+                    lines.append("This put would likely expire worthless because the price is above \(OptionsFormat.money(K)).")
+                }
+                lines.append("You paid about \(OptionsFormat.number(prem)) per share for this option.")
+            case (.short, .call):
+                lines.append("You sold this call and collected about \(OptionsFormat.number(prem)) per share up front.")
+                if intrinsicPerShare > 0 {
+                    lines.append("At this price, the call would be worth about \(OptionsFormat.number(intrinsicPerShare)) per share to the buyer, so you’d give up value against what you collected.")
+                } else {
+                    lines.append("If the price stays below \(OptionsFormat.money(K)), the call likely expires worthless and you keep what you collected.")
+                }
+            case (.short, .put):
+                lines.append("You sold this put and collected about \(OptionsFormat.number(prem)) per share up front.")
+                if intrinsicPerShare > 0 {
+                    lines.append("At this price, the put would be worth about \(OptionsFormat.number(intrinsicPerShare)) per share to the buyer, so you’d give up value against what you collected.")
+                } else {
+                    lines.append("If the price stays above \(OptionsFormat.money(K)), the put likely expires worthless and you keep what you collected.")
+                }
+            }
 
-            let perShareExpl = {
-                let base = "Per‑share P/L = Intrinsic − Premium = \(OptionsFormat.number(intrinsicPerShare)) − \(OptionsFormat.number(prem)) = \(OptionsFormat.number(rawPerShare))"
-                return (side == .long) ? base : "Short flips sign: −(\(OptionsFormat.number(rawPerShare))) = \(OptionsFormat.number(perSharePL))"
-            }()
-
-            let legPLExpl = "Leg P/L = per‑share × contracts × 100 = \(OptionsFormat.number(perSharePL)) × \(qty) × \(Int(mult)) = \(OptionsFormat.money(legPL))"
+            let perShareWord = perSharePL >= 0 ? "ahead" : "behind"
+            let perShareAbs = OptionsFormat.number(abs(perSharePL))
+            let contractsWord = qty == 1 ? "contract" : "contracts"
+            lines.append("After that, you’re \(perShareWord) by about \(perShareAbs) per share, which comes to \(OptionsFormat.money(legPL)) for \(qty) \(contractsWord) (\(Int(mult)) shares each).")
 
             return ScenarioLegBreakdown(
                 title: legTitle,
-                intrinsicExplanation: intrinsicExpl,
-                perShareExplanation: perShareExpl,
-                legPLExplanation: legPLExpl,
+                narrativeLines: lines,
                 legPL: legPL
             )
         }
@@ -181,9 +229,7 @@ private struct ScenarioResult {
 
 private struct ScenarioLegBreakdown {
     let title: String
-    let intrinsicExplanation: String
-    let perShareExplanation: String
-    let legPLExplanation: String
+    let narrativeLines: [String]
     let legPL: Double
 }
 

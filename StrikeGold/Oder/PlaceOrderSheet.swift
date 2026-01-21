@@ -181,6 +181,13 @@ struct PlaceOrderSheet: View {
                     TextField("Add a note for this order", text: $note, axis: .vertical)
                         .lineLimit(1...3)
                 }
+#if DEBUG
+                Section("Debug") {
+                    Toggle(isOn: $debugLogsEnabled) {
+                        Label("Debug Logs", systemImage: debugLogsEnabled ? "ladybug.fill" : "ladybug")
+                    }
+                }
+#endif
             }
             .navigationTitle("Place Order")
             .toolbar {
@@ -196,14 +203,6 @@ struct PlaceOrderSheet: View {
                     .disabled(Double(limitText) == nil)
                     .tint(side.tint)
                 }
-#if DEBUG
-                ToolbarItem(placement: .topBarTrailing) {
-                    Toggle(isOn: $debugLogsEnabled) {
-                        Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug")
-                    }
-                    .toggleStyle(.switch)
-                }
-#endif
             }
         }
     }

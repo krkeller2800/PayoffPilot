@@ -120,6 +120,7 @@ struct ContentView: View {
     @State private var showWhatIfSheet: Bool = false
     @State private var showEducation: Bool = false
     @State private var showOrders: Bool = false
+    @State private var showSavedStrategies: Bool = false
 
     private enum OrderSide { case buy, sell }
 
@@ -185,6 +186,7 @@ struct ContentView: View {
             showSavedConfirmation: $showSavedConfirmation,
             showWhatIfSheet: $showWhatIfSheet,
             showOrders: $showOrders,
+            showSavedStrategies: $showSavedStrategies,
             dataSourceLabel: dataSourceLabel,
             isDelayedBadgeVisible: isDelayedBadgeVisible,
             lastRefresh: lastRefresh,
@@ -197,6 +199,7 @@ struct ContentView: View {
             rebuildProviderFromStorage: rebuildProviderFromStorage,
             quotesFooterText: quotesFooterText,
             onPlaceOrder: { self.startOrderFlow() },
+            onSaveStrategy: { self.saveCurrentStrategy() },
             canPlaceOrder: self.canPlaceOrder,
             debugLogsEnabled: $debugLogsEnabled
         ))
@@ -210,6 +213,7 @@ struct ContentView: View {
         @Binding var showSavedConfirmation: Bool
         @Binding var showWhatIfSheet: Bool
         @Binding var showOrders: Bool
+        @Binding var showSavedStrategies: Bool
 
         let dataSourceLabel: String
         let isDelayedBadgeVisible: Bool
@@ -225,6 +229,7 @@ struct ContentView: View {
         let rebuildProviderFromStorage: () -> Void
         let quotesFooterText: String
         let onPlaceOrder: () -> Void
+        let onSaveStrategy: () -> Void
         let canPlaceOrder: Bool
 
         @Binding var debugLogsEnabled: Bool
@@ -235,6 +240,10 @@ struct ContentView: View {
                     VStack(spacing: 16) {
                         inputsCard()
                         educationCard()
+                        #if DEBUG
+                           Toggle(isOn: $debugLogsEnabled) { Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug") }
+                               .toggleStyle(.switch)
+                        #endif
                     }
                     .padding()
                 }
@@ -251,6 +260,15 @@ struct ContentView: View {
                         }
                     }
                     ToolbarItem(placement: .topBarTrailing) {
+                        Menu {
+                            Button("Save Strategy") { onSaveStrategy() }
+                            Button("See Strategies") { showSavedStrategies = true }
+                        } label: {
+                            Image(systemName: "list.bullet")
+                        }
+                        .accessibilityLabel("Strategy")
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
                         HStack(spacing: 12) {
                             Button {
                                 #if canImport(UIKit)
@@ -264,10 +282,6 @@ struct ContentView: View {
                             } label: {
                                 Image(systemName: "gearshape")
                             }
-                            #if DEBUG
-                            Toggle(isOn: $debugLogsEnabled) { Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug") }
-                                .toggleStyle(.switch)
-                            #endif
                         }
                     }
                 }
@@ -292,6 +306,9 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showOrders) {
                 OrderHistoryView()
+            }
+            .sheet(isPresented: $showSavedStrategies) {
+                SavedStrategiesView()
             }
             .alert("Saved", isPresented: $showSavedConfirmation) {
                 Button("OK", role: .cancel) { }
@@ -716,6 +733,8 @@ struct ContentView: View {
                             .minimumScaleFactor(0.8)
                     }
                     .buttonStyle(.bordered)
+                        .disabled(selectedExpiration == nil)
+                        .opacity(selectedExpiration == nil ? 0.5 : 1.0)
                 }
                 .alert("Saved", isPresented: $showSavedConfirmation) {
                     Button("OK", role: .cancel) { }

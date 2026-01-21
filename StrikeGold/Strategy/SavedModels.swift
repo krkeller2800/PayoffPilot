@@ -8,7 +8,10 @@ import Foundation
 
 struct SavedStrategy: Identifiable, Codable, Hashable {
     enum Kind: String, Codable {
-        case singleCall, singlePut, bullCallSpread
+        case singleCall
+        case singlePut
+        case bullCallSpread
+        case bullPutSpread
     }
     struct SavedLeg: Codable, Hashable {
         var type: String // "call" or "put"
@@ -51,3 +54,4 @@ final class StrategyStore {
         save(all)
     }
 }
+

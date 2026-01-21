@@ -155,20 +155,19 @@ struct SettingsView: View {
                         Spacer()
                     }
                 }
+#if DEBUG
+                Section("Debug") {
+                    Toggle(isOn: $debugLogsEnabled) {
+                        Label("Debug Logs", systemImage: debugLogsEnabled ? "ladybug.fill" : "ladybug")
+                    }
+                }
+#endif
             }
             .navigationTitle("Settings")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") { dismiss() }
                 }
-#if DEBUG
-                ToolbarItem(placement: .topBarLeading) {
-                    Toggle(isOn: $debugLogsEnabled) {
-                        Image(systemName: debugLogsEnabled ? "ladybug.fill" : "ladybug")
-                    }
-                    .toggleStyle(.switch)
-                }
-#endif
             }
         }
     }
