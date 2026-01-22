@@ -13,6 +13,9 @@ import UIKit
 #if canImport(AppKit)
 import AppKit
 #endif
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
 
 struct ManualDataEditorView: View {
     @State private var symbol: String = ""
@@ -41,6 +44,24 @@ struct ManualDataEditorView: View {
 
     @AppStorage("manual_autoUpdateUnderlyingAtExpiration") private var autoUpdateUnderlyingAtExpiration: Bool = false
     @State private var didAutoUpdateForCurrentSelection: Bool = false
+
+    @State private var showFileImporter: Bool = false
+    @State private var importedRows: [ImportedRow] = []
+    @State private var importRawPreview: String = ""
+    @State private var importAnalysis: String? = nil
+    @State private var showImportPreview: Bool = false
+    @State private var importOverrideKindEnabled: Bool = false
+    @State private var importOverrideKind: OptionContract.Kind = .call
+
+    @State private var importTargetSymbol: String = ""
+    @State private var importSymbolsFound: [String] = []
+    @State private var showChainViewer: Bool = false
+    @State private var chainSearchText: String = ""
+    @State private var chainFilterSelection: Int = 0 // 0=All, 1=Calls, 2=Puts
+
+    @State private var allExpirations: [Date] = []
+    @State private var allChains: [Date: (calls: [OptionContract], puts: [OptionContract])] = [:]
+    @State private var isLoadingAllChains: Bool = false
 
     // MARK: - Yahoo Finance Fetch
     private func fetchUnderlyingFromYahoo(symbol raw: String) async -> Double? {
@@ -179,6 +200,327 @@ struct ManualDataEditorView: View {
         } catch {
             print("[Yahoo-Chart] Request failed with error: \(error)")
             return nil
+        }
+    }
+
+    private struct ImportedRow {
+        let symbol: String?
+        let strike: Double
+        let last: Double?
+        let bid: Double?
+        let ask: Double?
+        let kind: OptionContract.Kind?
+        let expiration: Date?
+    }
+
+    private func beginImport(from text: String) {
+        let rows = parseImportedText(text, defaultKind: importOverrideKind)
+        self.importedRows = rows
+        // Compute unique symbols found (uppercased, non-empty)
+        let syms = Array(Set(rows.compactMap { $0.symbol?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }.filter { !$0.isEmpty })).sorted()
+        self.importSymbolsFound = syms
+        let current = self.symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        if syms.count == 1, let only = syms.first {
+            if current.isEmpty { self.symbol = only }
+            self.importTargetSymbol = current.isEmpty ? only : (syms.contains(current) ? current : only)
+        } else if syms.count > 1 {
+            self.importTargetSymbol = syms.contains(current) ? current : (syms.first ?? "")
+        } else {
+            // No symbol column present; use current editor symbol (may be empty)
+            self.importTargetSymbol = current
+        }
+        self.importOverrideKindEnabled = false
+        self.importOverrideKind = .call
+        self.showImportPreview = true
+
+        let previewLines = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n").prefix(8)
+        self.importRawPreview = previewLines.joined(separator: "\n")
+        self.importAnalysis = rows.isEmpty ? analyzeImportFailure(rawText: text) : nil
+
+        Task { @MainActor in
+            if rows.isEmpty { self.statusMessage = "No importable rows found." }
+        }
+    }
+
+    private func parseImportedText(_ text: String, defaultKind: OptionContract.Kind) -> [ImportedRow] {
+        // Normalize line endings and split lines
+        let rawLines = text.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n").components(separatedBy: "\n")
+        let lines = rawLines
+            .map { $0.replacingOccurrences(of: "\u{2014}", with: "-") /* em dash */
+                        .replacingOccurrences(of: "\u{2013}", with: "-") /* en dash */
+                        .trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !lines.isEmpty else { return [] }
+        // Detect header (scan the first few lines to handle a leading Calls/Puts label)
+        let headerKeywords = ["strike", "last", "last price", "mark", "bid", "ask", "type", "option", "call/put", "right", "symbol", "ticker", "underlying", "root", "expiration", "expiry", "exp", "expiration date", "exp date", "expire", "expire date", "contract name", "last trade date"]
+        let headerIdx: Int? = {
+            let limit = min(8, lines.count)
+            for i in 0..<limit {
+                let l = lines[i].lowercased()
+                if headerKeywords.contains(where: { kw in l.contains(kw) }) { return i }
+            }
+            return nil
+        }()
+        let hasHeader = (headerIdx != nil)
+        let headerLine = hasHeader ? lines[headerIdx!].lowercased() : lines.first!.lowercased()
+        // Tokenize a line by comma or tab or runs of 2+ spaces
+        func split(_ line: String) -> [String] {
+            // Split by comma, tab, or runs of 2+ spaces (to handle table copies robustly)
+            var tokens: [String] = []
+            let primary = line.components(separatedBy: CharacterSet(charactersIn: ",\t"))
+            for var chunk in primary {
+                // Convert any run of 2+ spaces into a single tab, iteratively
+                while chunk.contains("  ") { chunk = chunk.replacingOccurrences(of: "  ", with: "\t") }
+                while chunk.contains("\t\t") { chunk = chunk.replacingOccurrences(of: "\t\t", with: "\t") }
+                let parts = chunk.components(separatedBy: "\t")
+                for p in parts {
+                    let t = p.trimmingCharacters(in: .whitespaces)
+                    if !t.isEmpty { tokens.append(t) }
+                }
+            }
+            return tokens
+        }
+        func cleanDouble(_ s: String?) -> Double? {
+            guard let s = s else { return nil }
+            let cleaned = s.replacingOccurrences(of: ",", with: "").replacingOccurrences(of: "$", with: "")
+            return Double(cleaned)
+        }
+        // Build header index map if present
+        var symbolIdx: Int? = nil
+        var strikeIdx: Int? = nil
+        var lastIdx: Int? = nil
+        var bidIdx: Int? = nil
+        var askIdx: Int? = nil
+        var typeIdx: Int? = nil
+        var expirationIdx: Int? = nil
+        var bodyLines: ArraySlice<String>
+        if let hIdx = headerIdx {
+            bodyLines = lines.dropFirst(hIdx + 1)[...]
+        } else {
+            bodyLines = lines[...]
+        }
+        if hasHeader {
+            let headers = split(lines[headerIdx!])
+            func indexOf(_ candidates: [String]) -> Int? {
+                // Exact equality first
+                for (i, h) in headers.enumerated() {
+                    let hl = h.lowercased()
+                    if candidates.contains(where: { hl == $0 }) { return i }
+                }
+                // Then contains, but only for multi-word candidates (avoid matching 'last' to 'last trade date')
+                for (i, h) in headers.enumerated() {
+                    let hl = h.lowercased()
+                    for c in candidates where c.contains(" ") {
+                        if hl.contains(c) { return i }
+                    }
+                }
+                return nil
+            }
+            symbolIdx = indexOf(["symbol", "ticker", "underlying", "root", "contract name"])
+            strikeIdx = indexOf(["strike", "strike price"])
+            lastIdx   = indexOf(["last price", "mark", "last"])
+            bidIdx    = indexOf(["bid", "bid price"])
+            askIdx    = indexOf(["ask", "ask price", "offer"])
+            typeIdx   = indexOf(["type", "option type", "call/put", "right"])
+            expirationIdx = indexOf(["expiration", "expiry", "exp", "expiration date", "exp date", "expire", "expire date"])
+        }
+        // Track current section kind when Yahoo copies include "Calls" / "Puts" headers
+        var currentSectionKind: OptionContract.Kind? = nil
+        var currentSectionExpiration: Date? = nil
+
+        let mmmDYFormatter: DateFormatter = { let df = DateFormatter(); df.dateFormat = "MMM d, yyyy"; df.locale = Locale(identifier: "en_US_POSIX"); df.timeZone = TimeZone(secondsFromGMT: 0); return df }()
+        let mmmmDYFormatter: DateFormatter = { let df = DateFormatter(); df.dateFormat = "MMMM d, yyyy"; df.locale = Locale(identifier: "en_US_POSIX"); df.timeZone = TimeZone(secondsFromGMT: 0); return df }()
+
+        var rows: [ImportedRow] = []
+        rows.reserveCapacity(bodyLines.count)
+        for line in bodyLines {
+            let lower = line.lowercased()
+            // Detect lines that look like an expiration heading (e.g., "Feb 21, 2025" or "2025-02-21")
+            let trimmedLine = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedLine.isEmpty {
+                // Try ISO-like date first
+                if let isoDate = parseExpirationDate(trimmedLine) {
+                    currentSectionExpiration = isoDate
+                    continue
+                }
+                // Try textual month formats
+                if let d = mmmDYFormatter.date(from: trimmedLine) ?? mmmmDYFormatter.date(from: trimmedLine) {
+                    currentSectionExpiration = d
+                    continue
+                }
+            }
+            // Skip obvious non-data lines
+            if lower.hasPrefix("contract name") || lower.hasPrefix("last trade") || lower.hasPrefix("change") || lower.hasPrefix("volume") || lower.hasPrefix("open interest") || lower.contains("in the money") || lower == "calls" || lower == "puts" {
+                if lower == "calls" { currentSectionKind = .call }
+                if lower == "puts" { currentSectionKind = .put }
+                continue
+            }
+            let parts = split(line)
+            if parts.isEmpty { continue }
+            // If first token is a single letter C/P, use it as kind and remove from parts
+            var mutableParts = parts
+            var rowKind: OptionContract.Kind? = currentSectionKind
+            if let first = mutableParts.first, first.count == 1 {
+                let f = first.lowercased()
+                if f == "c" { rowKind = .call; mutableParts.removeFirst() }
+                else if f == "p" { rowKind = .put; mutableParts.removeFirst() }
+            }
+
+            var parsedSymbol: String? = nil
+            if let symIdx = symbolIdx, symIdx < parts.count {
+                let s = parts[symIdx].trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                parsedSymbol = s.isEmpty ? nil : s
+            }
+
+            var occSymbol: String? = nil
+            var occStrike: Double? = nil
+            var occKind: OptionContract.Kind? = nil
+            var occExp: Date? = nil
+            // Attempt to parse OCC contract code from the "Contract Name" field or first token
+            let nameCandidate: String = {
+                if let symIdx = symbolIdx, symIdx < parts.count { return parts[symIdx] }
+                return parts.first ?? ""
+            }()
+            let occParsed = parseOCCContract(nameCandidate)
+            occSymbol = occParsed.symbol
+            occStrike = occParsed.strike
+            occKind = occParsed.kind
+            occExp = occParsed.expiration
+            if parsedSymbol == nil, let os = occSymbol { parsedSymbol = os }
+
+            // If the parsedSymbol appears to be an OCC contract code, prefer the OCC-derived underlying symbol
+            if let ps = parsedSymbol {
+                let occCheck = parseOCCContract(ps)
+                if let occUnderlying = occCheck.symbol, occUnderlying != ps {
+                    parsedSymbol = occUnderlying
+                }
+            }
+
+            // Header-based mapping preferred
+            var strike: Double? = nil
+            var last: Double? = nil
+            var bid: Double? = nil
+            var ask: Double? = nil
+            var kindDetected: OptionContract.Kind? = nil
+            var parsedExpiration: Date? = nil
+            if let sIdx = strikeIdx, sIdx < mutableParts.count { strike = cleanDouble(mutableParts[sIdx]) }
+            if let lIdx = lastIdx, lIdx < mutableParts.count { last = cleanDouble(mutableParts[lIdx]) }
+            if let bIdx = bidIdx,  bIdx < mutableParts.count { bid  = cleanDouble(mutableParts[bIdx]) }
+            if let aIdx = askIdx,  aIdx < mutableParts.count { ask  = cleanDouble(mutableParts[aIdx]) }
+            if let tIdx = typeIdx, tIdx < mutableParts.count {
+                let t = mutableParts[tIdx].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                if t.hasPrefix("c") { kindDetected = .call } else if t.hasPrefix("p") { kindDetected = .put }
+            }
+            if let eIdx = expirationIdx, eIdx < mutableParts.count {
+                parsedExpiration = parseExpirationDate(mutableParts[eIdx])
+            }
+            if strike == nil, let s = occStrike { strike = s }
+            if parsedExpiration == nil, let e = occExp { parsedExpiration = e }
+            if parsedExpiration == nil, let e = currentSectionExpiration { parsedExpiration = e }
+            if kindDetected == nil, let k = occKind { kindDetected = k }
+            // If no header mapping, use positional heuristics
+            if strike == nil && last == nil && bid == nil && ask == nil {
+                if mutableParts.count >= 4, let s = cleanDouble(mutableParts[0]) {
+                    strike = s; last = cleanDouble(mutableParts[1]); bid = cleanDouble(mutableParts[2]); ask = cleanDouble(mutableParts[3])
+                } else if mutableParts.count >= 3 {
+                    // Not enough info to set strike; skip this row
+                    continue
+                }
+            }
+            guard let s = strike else { continue }
+            let finalKind = rowKind ?? kindDetected
+            rows.append(ImportedRow(symbol: parsedSymbol, strike: s, last: last, bid: bid, ask: ask, kind: finalKind, expiration: parsedExpiration))
+        }
+        return rows
+    }
+
+    private func analyzeImportFailure(rawText: String) -> String {
+        // Normalize and split into lines
+        let normalized = rawText.replacingOccurrences(of: "\r\n", with: "\n").replacingOccurrences(of: "\r", with: "\n")
+        let lines = normalized.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        if lines.isEmpty {
+            return "Clipboard contained no text."
+        }
+        // Tokenize similar to parseImportedText: comma, tab, or runs of 2+ spaces
+        func split(_ line: String) -> [String] {
+            var tokens: [String] = []
+            let primary = line.components(separatedBy: CharacterSet(charactersIn: ",\t"))
+            for chunk in primary {
+                let parts = chunk.replacingOccurrences(of: "  ", with: "\t").components(separatedBy: "\t")
+                for p in parts {
+                    let t = p.trimmingCharacters(in: .whitespaces)
+                    if !t.isEmpty { tokens.append(t) }
+                }
+            }
+            return tokens
+        }
+        func toDouble(_ s: String) -> Double? {
+            let cleaned = s.replacingOccurrences(of: ",", with: "").replacingOccurrences(of: "$", with: "")
+            return Double(cleaned)
+        }
+        var maxNumericPerLine = 0
+        var linesWithAtLeastThree = 0
+        for line in lines.prefix(50) { // limit work
+            let tokens = split(line)
+            let nums = tokens.compactMap(toDouble)
+            maxNumericPerLine = max(maxNumericPerLine, nums.count)
+            if nums.count >= 3 { linesWithAtLeastThree += 1 }
+        }
+        if linesWithAtLeastThree == 0 {
+            return "We couldn’t find at least three numeric values on a single line. Expect rows like: Strike, Last, Bid, Ask."
+        }
+        let header = lines.first!.lowercased()
+        let hasHeader = header.contains("strike") || header.contains("last") || header.contains("mark") || header.contains("bid") || header.contains("ask") || header.contains("type") || header.contains("expiration") || header.contains("expiry") || header.contains("exp date") || header.contains("expire") || header.contains("expire date")
+        if !hasHeader {
+            return "We found numbers but couldn’t map columns. Include a header row with Strike, Last (or Mark), Bid, Ask (and optional Type/Expiration), or ensure each row is: Strike, Last, Bid, Ask."
+        }
+        return "We found a header but couldn’t map the expected columns. Make sure the header includes Strike and at least one of Last/Mark, Bid, or Ask. Supported headers: Strike, Last (or Mark), Bid, Ask, Type, Expiration."
+    }
+
+    private func commitImport(rows: [ImportedRow], overrideKind: OptionContract.Kind?) async {
+        // Determine target symbol
+        let chosen = importTargetSymbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let current = symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let target = chosen.isEmpty ? current : chosen
+        guard !target.isEmpty else {
+            await MainActor.run { self.statusMessage = "Choose a symbol to import into." }
+            return
+        }
+        // Filter rows to target symbol
+        let filtered: [ImportedRow] = rows.filter { ($0.symbol ?? target) == target }
+        guard !filtered.isEmpty else {
+            await MainActor.run { self.statusMessage = "No rows for symbol \(target)." }
+            return
+        }
+        // Group by expiration (default to current editor selection when missing)
+        let defaultExp = self.expiration
+        var groups: [Date: [ImportedRow]] = [:]
+        for r in filtered {
+            let exp = normalizeToNoonEastern(r.expiration ?? defaultExp)
+            groups[exp, default: []].append(r)
+        }
+        // Persist each group
+        var total = 0
+        for (exp, groupRows) in groups {
+            var callContracts: [OptionContract] = []
+            var putContracts: [OptionContract] = []
+            for r in groupRows {
+                let k = overrideKind ?? r.kind ?? .call
+                let oc = OptionContract(kind: k, strike: r.strike, bid: r.bid, ask: r.ask, last: r.last)
+                if k == .call { callContracts.append(oc) } else { putContracts.append(oc) }
+            }
+            callContracts.sort { $0.strike < $1.strike }
+            putContracts.sort { $0.strike < $1.strike }
+            await ManualDataProvider.shared.setOptionChain(symbol: target, expiration: exp, calls: callContracts, puts: putContracts)
+            total += groupRows.count
+        }
+        // Update editor symbol and refresh
+        await MainActor.run { self.symbol = target }
+        await refreshChain()
+        await MainActor.run {
+            let expCount = groups.keys.count
+            self.statusMessage = "Imported \(total) rows for \(target) across \(expCount) expiration(s)."
+            self.showImportPreview = false
         }
     }
 
@@ -347,10 +689,43 @@ struct ManualDataEditorView: View {
                     Image(systemName: "info.circle")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text("Strike is needed to browse Yahoo. Then copy 'last bid ask' and paste the row.")
+                    Text("Symbol and Strike are needed to browse Yahoo. Then copy 'last bid ask' and paste the row.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Section("Bulk Import") {
+                    HStack(spacing: 16) {
+                        VStack(spacing: 4) {
+                            Text("Paste CSV/Text").font(.caption2).foregroundStyle(.secondary)
+                            Button {
+                                #if canImport(UIKit)
+                                if let s = UIPasteboard.general.string { beginImport(from: s) } else { Task { await MainActor.run { statusMessage = "Clipboard is empty." } } }
+                                #elseif canImport(AppKit)
+                                if let s = NSPasteboard.general.string(forType: .string) { beginImport(from: s) } else { Task { await MainActor.run { statusMessage = "Clipboard is empty." } } }
+                                #endif
+                            } label: { Image(systemName: "doc.on.clipboard.fill") }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .help("Paste CSV or tab-delimited rows")
+                        }
+                        Spacer()
+                        VStack(spacing: 4) {
+                            Text("Import CSV File").font(.caption2).foregroundStyle(.secondary)
+                            Button { showFileImporter = true } label: { Image(systemName: "tray.and.arrow.down.fill") }
+                            .buttonStyle(.bordered)
+                            .controlSize(.mini)
+                            .help("Choose a CSV or text file to import")
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle").font(.caption2).foregroundStyle(.secondary)
+                        Text("Supports headers: Strike, Last, Bid, Ask, Type. You can override Call/Put in the preview.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 if !callContracts.isEmpty || !putContracts.isEmpty {
@@ -380,9 +755,20 @@ struct ManualDataEditorView: View {
             } header: {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text("Option Chain")
-                    Text("(not automatically retrievable)")
+                    Text("(manually input)")
                         .font(.caption)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
 //                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        Task { await loadAllFutureChains(); showChainViewer = true }
+                    } label: {
+                        Image(systemName: "eye")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .help("View full option chain")
                 }
             }
 
@@ -435,6 +821,220 @@ struct ManualDataEditorView: View {
             updateCanPasteRow()
         }
         #endif
+#if canImport(UniformTypeIdentifiers)
+        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.commaSeparatedText, .plainText]) { result in
+            switch result {
+            case .success(let url):
+                do {
+                    let data = try Data(contentsOf: url)
+                    if let s = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) {
+                        beginImport(from: s)
+                    } else {
+                        Task { await MainActor.run { statusMessage = "Couldn’t read file as text." } }
+                    }
+                } catch {
+                    Task { await MainActor.run { statusMessage = "Failed to read file: \(error.localizedDescription)" } }
+                }
+            case .failure(let err):
+                Task { await MainActor.run { statusMessage = "Import canceled: \(err.localizedDescription)" } }
+            }
+        }
+#endif
+        .sheet(isPresented: $showImportPreview) {
+            NavigationStack {
+                VStack(spacing: 12) {
+                    if importedRows.isEmpty {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("No rows detected.")
+                                    .font(.headline)
+                                if let analysis = importAnalysis, !analysis.isEmpty {
+                                    Text(analysis)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                if !importRawPreview.isEmpty {
+                                    GroupBox("Clipboard sample") {
+                                        ScrollView {
+                                            Text(importRawPreview)
+                                                .font(.system(.caption2, design: .monospaced))
+                                                .textSelection(.enabled)
+                                                .frame(maxWidth: .infinity, alignment: .leading)
+                                        }
+                                        .frame(maxHeight: 180)
+                                    }
+                                }
+                                Text("Tips:")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text("• Include a header row with Strike, Last (or Mark), Bid, Ask, and optionally Type/Expiration; or paste rows as Strike, Last, Bid, Ask.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text("• Copies from Yahoo tables are supported. Use the table rows, not links or screenshots.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Text("• If Type is missing, you can override Call/Put in the preview.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.horizontal)
+                        }
+                    } else {
+                        List {
+                            Section("Symbol") {
+                                if importSymbolsFound.count > 1 {
+                                    Picker("Import into", selection: $importTargetSymbol) {
+                                        ForEach(importSymbolsFound, id: \.self) { Text($0).tag($0) }
+                                    }
+                                } else {
+                                    TextField("Symbol", text: $importTargetSymbol)
+                                        .textInputAutocapitalization(.characters)
+                                        .autocorrectionDisabled(true)
+                                }
+                                let target = importTargetSymbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                                let skipped = importedRows.filter { ($0.symbol ?? target) != target }.count
+                                if skipped > 0 {
+                                    Text("\(skipped) rows will be skipped (different symbol).")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Section("Preview (\(importedRows.count) rows)") {
+                                ForEach(Array(importedRows.enumerated()), id: \.offset) { idx, r in
+                                    HStack(spacing: 8) {
+                                        let kind = (r.kind ?? (importOverrideKindEnabled ? importOverrideKind : .call))
+                                        Text(kind == .call ? "C" : "P").font(.caption2).foregroundStyle(.secondary).frame(width: 14)
+                                        Text(Self.formatNumber(r.strike)).monospacedDigit().frame(maxWidth: .infinity, alignment: .leading)
+                                        let bidText = r.bid.map(Self.formatNumber) ?? "—"
+                                        let askText = r.ask.map(Self.formatNumber) ?? "—"
+                                        let lastText = r.last.map(Self.formatNumber) ?? "—"
+                                        Text("L \(lastText)  B \(bidText)  A \(askText)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .monospacedDigit()
+                                            .lineLimit(1)
+                                        if let exp = r.expiration {
+                                            Text(exp.formatted(.dateTime.month(.abbreviated).day()))
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        } else {
+                                            Text("—")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                            }
+                            Section {
+                                Toggle("Override kind for all rows", isOn: $importOverrideKindEnabled)
+                                if importOverrideKindEnabled {
+                                    Picker("Kind", selection: $importOverrideKind) {
+                                        Text("Call").tag(OptionContract.Kind.call)
+                                        Text("Put").tag(OptionContract.Kind.put)
+                                    }.pickerStyle(.segmented)
+                                }
+                            }
+                        }
+                    }
+                }
+                .navigationTitle("Import Preview")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { showImportPreview = false } }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Import") {
+                            let override = importOverrideKindEnabled ? importOverrideKind : nil
+                            Task { await commitImport(rows: importedRows, overrideKind: override) }
+                        }.disabled(importedRows.isEmpty)
+                    }
+                }
+            }
+        }
+        .sheet(isPresented: $showChainViewer) {
+            NavigationStack {
+                VStack(spacing: 0) {
+                    if isLoadingAllChains {
+                        ProgressView("Loading all expirations…")
+                            .padding()
+                    }
+                    List {
+                        let q = chainSearchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        ForEach(allExpirations.sorted(), id: \.self) { exp in
+                            if let tuple = allChains[exp] {
+                                let calls = tuple.calls
+                                let puts = tuple.puts
+                                let filteredCalls: [OptionContract] = {
+                                    if q.isEmpty { return calls }
+                                    return calls.filter { OptionsFormat.number($0.strike).lowercased().contains(q) || String(format: "%.2f", $0.strike).lowercased().contains(q) }
+                                }()
+                                let filteredPuts: [OptionContract] = {
+                                    if q.isEmpty { return puts }
+                                    return puts.filter { OptionsFormat.number($0.strike).lowercased().contains(q) || String(format: "%.2f", $0.strike).lowercased().contains(q) }
+                                }()
+                                if chainFilterSelection == 0 || chainFilterSelection == 1 {
+                                    if !filteredCalls.isEmpty {
+                                        Section(header: Text(exp.formatted(.dateTime.month(.abbreviated).day()))) {
+                                            Section("Calls") {
+                                                ForEach(filteredCalls, id: \._id) { c in
+                                                    ContractRow(contract: c, expiration: exp)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if chainFilterSelection == 0 || chainFilterSelection == 2 {
+                                    if !filteredPuts.isEmpty {
+                                        Section(header: Text(exp.formatted(.dateTime.month(.abbreviated).day()))) {
+                                            Section("Puts") {
+                                                ForEach(filteredPuts, id: \._id) { c in
+                                                    ContractRow(contract: c, expiration: exp)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if (chainFilterSelection == 1 && filteredCalls.isEmpty) || (chainFilterSelection == 2 && filteredPuts.isEmpty) || (chainFilterSelection == 0 && filteredCalls.isEmpty && filteredPuts.isEmpty) {
+                                    // No rows for this expiration under current filter; omit section entirely
+                                }
+                            }
+                        }
+                        if allExpirations.isEmpty {
+                            Text("No future expirations to display.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .searchable(text: $chainSearchText, placement: .navigationBarDrawer(displayMode: .automatic), prompt: "Search strike")
+                .navigationTitle("Chain \(symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased())")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("Close") { showChainViewer = false } }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Clear") {
+                            Task { @MainActor in
+                                self.allExpirations = []
+                                self.allChains = [:]
+                                self.chainSearchText = ""
+                                self.statusMessage = "Cleared option chain viewer."
+                            }
+                        }
+                    }
+                    ToolbarItem(placement: .principal) {
+                        Picker("Filter", selection: $chainFilterSelection) {
+                            Text("All").tag(0)
+                            Text("Calls").tag(1)
+                            Text("Puts").tag(2)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 280)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Actions
@@ -529,6 +1129,30 @@ struct ManualDataEditorView: View {
             }
         } catch {
             await MainActor.run { statusMessage = "Failed to load chain: \(error.localizedDescription)" }
+        }
+    }
+
+    private func loadAllFutureChains() async {
+        let sym = symbol.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !sym.isEmpty else { return }
+        await MainActor.run { isLoadingAllChains = true }
+        defer { Task { await MainActor.run { isLoadingAllChains = false } } }
+        do {
+            // Start with expirations known for the currently selected expiration
+            let data = try await ManualDataProvider.shared.fetchOptionChain(symbol: sym, expiration: expiration)
+            var exps = data.expirations.filter { $0 >= Date() }.sorted()
+            await MainActor.run { allExpirations = exps; allChains = [:] }
+            for exp in exps {
+                do {
+                    let chain = try await ManualDataProvider.shared.fetchOptionChain(symbol: sym, expiration: exp)
+                    await MainActor.run { allChains[exp] = (calls: chain.callContracts, puts: chain.putContracts) }
+                } catch {
+                    // Skip this expiration on failure
+                }
+            }
+        } catch {
+            // If initial fetch fails, clear data
+            await MainActor.run { allExpirations = []; allChains = [:] }
         }
     }
 
@@ -654,6 +1278,84 @@ struct ManualDataEditorView: View {
             }
         }
         return nums
+    }
+
+    private func parseExpirationDate(_ s: String) -> Date? {
+        let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return nil }
+        // Epoch seconds
+        if let secs = Int(trimmed), secs > 946684800, secs < 4102444800 {
+            return Date(timeIntervalSince1970: TimeInterval(secs))
+        }
+        // yyMMdd (OCC)
+        let occ = DateFormatter(); occ.dateFormat = "yyMMdd"; occ.timeZone = TimeZone(secondsFromGMT: 0)
+        if let d = occ.date(from: trimmed) { return d }
+        // yyyy-MM-dd
+        let ymd = DateFormatter(); ymd.dateFormat = "yyyy-MM-dd"; ymd.timeZone = TimeZone(secondsFromGMT: 0)
+        if let d = ymd.date(from: trimmed) { return d }
+        // yyyy/MM/dd
+        let ymd2 = DateFormatter(); ymd2.dateFormat = "yyyy/MM/dd"; ymd2.timeZone = TimeZone(secondsFromGMT: 0)
+        if let d = ymd2.date(from: trimmed) { return d }
+        // MM/dd/yyyy
+        let mdy = DateFormatter(); mdy.dateFormat = "MM/dd/yyyy"; mdy.timeZone = TimeZone(secondsFromGMT: 0)
+        if let d = mdy.date(from: trimmed) { return d }
+        // dd/MM/yyyy
+        let dmy = DateFormatter(); dmy.dateFormat = "dd/MM/yyyy"; dmy.timeZone = TimeZone(secondsFromGMT: 0)
+        if let d = dmy.date(from: trimmed) { return d }
+        // yyyyMMdd
+        let ymdc = DateFormatter(); ymdc.dateFormat = "yyyyMMdd"; ymdc.timeZone = TimeZone(secondsFromGMT: 0)
+        if let d = ymdc.date(from: trimmed) { return d }
+        return nil
+    }
+
+    private func parseOCCContract(_ raw: String) -> (symbol: String?, expiration: Date?, kind: OptionContract.Kind?, strike: Double?) {
+        let s = raw.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        // OCC format: ROOT(1-6) + YYMMDD(6) + [C|P](1) + STRIKE(8, price*1000)
+        let minLen = 1 + 6 + 1 + 8
+        guard s.count >= minLen else { return (nil, nil, nil, nil) }
+        let total = s.count
+        let suffixLen = 6 + 1 + 8
+        let rootLen = total - suffixLen
+        guard rootLen > 0 else { return (nil, nil, nil, nil) }
+        let root = String(s.prefix(rootLen))
+        let dateStart = s.index(s.startIndex, offsetBy: rootLen)
+        let dateEnd = s.index(dateStart, offsetBy: 6)
+        let rightIdx = s.index(dateEnd, offsetBy: 0)
+        let strikeStart = s.index(rightIdx, offsetBy: 1)
+        let strikeEnd = s.index(strikeStart, offsetBy: 8)
+        let dateStr = String(s[dateStart..<dateEnd])
+        let rightChar = s[rightIdx]
+        let strikeStr = String(s[strikeStart..<strikeEnd])
+        // Validate numeric portions
+        guard dateStr.allSatisfy({ $0.isNumber }), strikeStr.allSatisfy({ $0.isNumber }), rightChar == "C" || rightChar == "P" else {
+            return (nil, nil, nil, nil)
+        }
+        // Parse expiration YYMMDD -> 20YY-MM-DD
+        let yy = Int(dateStr.prefix(2)) ?? 0
+        let mm = Int(dateStr.dropFirst(2).prefix(2)) ?? 0
+        let dd = Int(dateStr.suffix(2)) ?? 0
+        var dc = DateComponents()
+        dc.year = 2000 + yy
+        dc.month = mm
+        dc.day = dd
+        dc.hour = 12
+        dc.minute = 0
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        let exp = cal.date(from: dc)
+        let strikeInt = Int(strikeStr) ?? 0
+        let strike = Double(strikeInt) / 1000.0
+        let kind: OptionContract.Kind = (rightChar == "C") ? .call : .put
+        return (root, exp, kind, strike)
+    }
+
+    private func normalizeToNoonEastern(_ date: Date) -> Date {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York") ?? .current
+        let comps = cal.dateComponents([.year, .month, .day], from: date)
+        var dc = DateComponents()
+        dc.year = comps.year; dc.month = comps.month; dc.day = comps.day; dc.hour = 12; dc.minute = 0
+        return cal.date(from: dc) ?? date
     }
 
     @MainActor

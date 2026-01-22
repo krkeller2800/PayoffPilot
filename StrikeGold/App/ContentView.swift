@@ -14,6 +14,7 @@ import Foundation
 @MainActor
 struct ContentView: View {
     @State private var debugLogsEnabled: Bool = false
+    @Environment(\.horizontalSizeClass) private var hSize: UserInterfaceSizeClass?
     #if DEBUG
     private func dlog(_ message: @autoclosure () -> String) {
         if debugLogsEnabled { print(message()) }
@@ -23,7 +24,7 @@ struct ContentView: View {
     // MARK: - Saving Models
     struct SavedStrategy: Identifiable, Codable, Hashable {
         enum Kind: String, Codable {
-            case singleCall, singlePut, bullCallSpread
+            case singleCall, singlePut, bullCallSpread, bullPutSpread
         }
         struct SavedLeg: Codable, Hashable {
             var type: String // "call" or "put"
@@ -71,6 +72,7 @@ struct ContentView: View {
         case singleCall = "Call"
         case singlePut = "Put"
         case bullCallSpread = "Bull Call Spread"
+        case bullPutSpread = "Bull Put Spread"
         var id: String { rawValue }
         var isSingle: Bool { self == .singleCall || self == .singlePut }
     }
@@ -234,10 +236,28 @@ struct ContentView: View {
 
         @Binding var debugLogsEnabled: Bool
 
+        @Environment(\.horizontalSizeClass) private var hSize: UserInterfaceSizeClass?
+
         var body: some View {
             NavigationStack {
                 ScrollView {
-                    VStack(spacing: 16) {
+                    VStack(spacing: 4) {
+                        HStack(alignment: .top, spacing: 2) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.yellow)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Orders are simulated")
+                                    .font(.caption)
+                                    .bold()
+                                Text("This app uses simulated trading. Orders here are not real.")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(10)
+                        .background(.thinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .accessibilityLabel("Orders are simulated only. Not real trades.")
                         inputsCard()
                         educationCard()
                         #if DEBUG
@@ -371,6 +391,25 @@ struct ContentView: View {
                 ),
                 OptionLeg(
                     type: .call,
+                    side: .short,
+                    strike: max(0, upperStrike),
+                    premium: max(0, upperPremium),
+                    contracts: max(1, contracts),
+                    multiplier: multiplier
+                )
+            ]
+        case .bullPutSpread:
+            return [
+                OptionLeg(
+                    type: .put,
+                    side: .long,
+                    strike: max(0, lowerStrike),
+                    premium: max(0, lowerPremium),
+                    contracts: max(1, contracts),
+                    multiplier: multiplier
+                ),
+                OptionLeg(
+                    type: .put,
                     side: .short,
                     strike: max(0, upperStrike),
                     premium: max(0, upperPremium),
@@ -552,7 +591,7 @@ struct ContentView: View {
                                                         premiumText = OptionsFormat.number(mid)
                                                     }
                                                 }
-                                            } else {
+                                            } else if strategy == .bullCallSpread {
                                                 // Bull Call Spread: choose lower ~ATM and upper next higher if available
                                                 if let lower = nearestStrike(to: price, in: callStrikes) {
                                                     selectedCallStrike = lower
@@ -570,8 +609,24 @@ struct ContentView: View {
                                                     }
                                                 }
                                             }
+                                            else if strategy == .bullPutSpread {
+                                                if let lower = nearestStrike(to: price, in: putStrikes) {
+                                                    selectedCallStrike = lower
+                                                    strikeText = OptionsFormat.number(lower)
+                                                    selectedCallContract = cachedPutContracts.first(where: { $0.strike == lower })
+                                                    if useMarketPremium, let mid = selectedCallContract?.mid {
+                                                        premiumText = OptionsFormat.number(mid)
+                                                    }
+                                                    let upper = nextHigherStrike(after: lower, in: putStrikes) ?? lower
+                                                    selectedPutStrike = upper
+                                                    selectedPutContract = cachedPutContracts.first(where: { $0.strike == upper })
+                                                    shortCallStrikeText = OptionsFormat.number(upper)
+                                                    if useMarketPremium, let mid = selectedPutContract?.mid {
+                                                        shortCallPremiumText = OptionsFormat.number(mid)
+                                                    }
+                                                }
+                                            }
                                         }
-                                        isFetching = false
                                     }
                                 } catch {
                                     await MainActor.run {
@@ -618,13 +673,43 @@ struct ContentView: View {
                     Spacer(minLength: 0)
                 }
 
-                Picker("Strategy", selection: $strategy) {
-                    ForEach(Strategy.allCases) { s in
-                        Text(s.rawValue).tag(s)
+                GeometryReader { proxy in
+                    // Use device's current horizontal width instead of size class
+                    let isNarrow = proxy.size.width < 500
+                    if isNarrow {
+                        VStack{
+                            Text("Spreads")
+                                .frame(maxWidth: .infinity, maxHeight: 10,alignment: .trailing)
+                                .padding(.trailing,(proxy.size.width/5))
+                                .font(.caption2)
+                            Picker("Strategy", selection: $strategy) {
+                                Text("Call").tag(Strategy.singleCall)
+                                    .accessibilityLabel("Single Call")
+                                Text("Put").tag(Strategy.singlePut)
+                                    .accessibilityLabel("Single Put")
+                                Text("Bull Call").tag(Strategy.bullCallSpread)
+                                    .accessibilityLabel("Bull Call Spread")
+                                Text("Bull Put").tag(Strategy.bullPutSpread)
+                                    .accessibilityLabel("Bull Put Spread")
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                    } else {
+                        Picker("Strategy", selection: $strategy) {
+                            Text("Call").tag(Strategy.singleCall)
+                                .accessibilityLabel("Single Call")
+                            Text("Put").tag(Strategy.singlePut)
+                                .accessibilityLabel("Single Put")
+                            Text("Bull Call Spread").tag(Strategy.bullCallSpread)
+                                .accessibilityLabel("Bull Call Spread")
+                            Text("Bull Put Spread").tag(Strategy.bullPutSpread)
+                                .accessibilityLabel("Bull Put Spread")
+                        }
+                        .pickerStyle(.segmented)
                     }
                 }
-                .pickerStyle(.segmented)
-
+                .frame(height: 50)
+                
                 if strategy.isSingle {
                     Picker("Side", selection: $side) {
                         ForEach(Side.allCases) { s in
@@ -642,7 +727,7 @@ struct ContentView: View {
                 } else {
                     // Bull Call Spread inputs
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Long Call (Lower Strike)")
+                        Text(strategy == .bullPutSpread ? "Long Put (Lower Strike)" : "Long Call (Lower Strike)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         HStack(spacing: 12) {
@@ -652,7 +737,7 @@ struct ContentView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Short Call (Upper Strike)")
+                        Text(strategy == .bullPutSpread ? "Short Put (Upper Strike)" : "Short Call (Upper Strike)")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         HStack(spacing: 12) {
@@ -757,420 +842,104 @@ struct ContentView: View {
             Text("Option Chain" + (isDelayedBadgeVisible ? " (delayed)" : ""))
                 .font(.subheadline)
 
+            // Header row: Expiration | Strike | Mid
+            HStack {
+                Text("Expiration")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                HStack {
+                    Text("Strike")
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    Text("Mid")
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
+                .frame(maxWidth: .infinity)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(height: 16)
+
+            // Controls row
+            HStack(spacing: 8) {
+                Picker(selection: $selectedExpiration) {
+                    Text("Expiration").tag(Optional<Date>.none)
+                    ForEach(expirations, id: \.self) { d in
+                        Text(expirationLabel(d)).tag(Optional(d))
+                    }
+                } label: {
+                    Text(selectedExpiration.map(expirationLabel) ?? "Expiration")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                        .allowsTightening(true)
+                        .truncationMode(.tail)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .pickerStyle(.menu)
+                .frame(minWidth: 175)
+                .onChange(of: selectedExpiration) { _, _ in
+                    if suppressExpirationRefetch {
+                        suppressExpirationRefetch = false
+                    } else {
+                        Task { await refetchForExpiration() }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                if strategy == .singleCall {
+                    contractPickerSection(
+                        title: "Call",
+                        selectedStrike: $selectedCallStrike,
+                        contracts: appContractsFor(kind: .call),
+                        onSelect: onSelectCallContract,
+                        compact: true
+                    )
+                    .frame(maxWidth: .infinity)
+                } else if strategy == .singlePut {
+                    contractPickerSection(
+                        title: "Put",
+                        selectedStrike: $selectedPutStrike,
+                        contracts: appContractsFor(kind: .put),
+                        onSelect: onSelectPutContract,
+                        compact: true
+                    )
+                    .frame(maxWidth: .infinity)
+                } else {
+                    // Keep layout consistent for spreads
+                    HStack {
+                        Text("—").frame(maxWidth: .infinity, alignment: .center)
+                        Text("—").frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            // Strategy-specific pickers (show detailed pickers for spreads)
             if strategy == .bullCallSpread {
-                ViewThatFits(in: .horizontal) {
-                    // Horizontal layout: Expiration + Long + Short
-                    HStack(spacing: 8) {
-                        // Expiration picker
-                        Picker("Expiration", selection: $selectedExpiration) {
-                            Text("Select Expiration").tag(Optional<Date>.none)
-                            ForEach(expirations, id: \.self) { d in
-                                Text(expirationLabel(d)).tag(Optional(d))
-                            }
-                        }
-                        .onChange(of: selectedExpiration) { _, _ in
-                            if suppressExpirationRefetch {
-                                suppressExpirationRefetch = false
-                            } else {
-                                Task { await refetchForExpiration() }
-                            }
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
-
-                        // Long (lower) call picker
-                        VStack(alignment: .leading, spacing: 4) {
-                            GeometryReader { geo in
-                                let col = geo.size.width / 2
-                                HStack(spacing: 0) {
-                                    Text("Long Call")
-                                        .frame(width: col, alignment: .center)
-                                        .offset(x: 12)
-                                    Text("Mid")
-                                        .frame(width: col, alignment: .center)
-                                        .offset(x: -12)
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(height: 16)
-
-                            Picker(selection: $selectedCallContract) {
-                                Text("Select Long").tag(Optional<OptionContract>.none)
-                                ForEach(filteredLongCallContracts(), id: \.self) { c in
-                                    Text(contractMenuRowText(c))
-                                        .font(.body)
-                                        .monospacedDigit()
-                                        .tag(Optional(c))
-                                }
-                            } label: {
-                                HStack {
-                                    Text(selectedCallContract.map { OptionsFormat.number($0.strike) } ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                    Text((selectedCallContract?.mid ?? selectedCallContract?.last).map(OptionsFormat.number) ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                }
-                                .font(.body)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .frame(maxWidth: 260, alignment: .center)
-                        .onChange(of: selectedCallContract) { _, new in
-                            #if DEBUG
-                            if let c = new {
-                                dlog("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
-                            }
-                            #endif
-                            if let c = new {
-                                selectedCallStrike = c.strike
-                                strikeText = OptionsFormat.number(c.strike)
-                                if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
-                                // Enforce lower < upper by nudging upper up if needed
-                                if let upper = selectedPutStrike, upper <= c.strike {
-                                    if let newUpper = nextHigherStrike(after: c.strike, in: callStrikes) {
-                                        selectedPutStrike = newUpper
-                                        selectedPutContract = cachedCallContracts.first(where: { $0.strike == newUpper })
-                                    }
-                                }
-                            }
-                        }
-
-                        // Short (upper) call picker
-                        VStack(alignment: .leading, spacing: 4) {
-                            GeometryReader { geo in
-                                let col = geo.size.width / 2
-                                HStack(spacing: 0) {
-                                    Text("Short Call")
-                                        .frame(width: col, alignment: .center)
-                                        .offset(x: 12)
-                                    Text("Mid")
-                                        .frame(width: col, alignment: .center)
-                                        .offset(x: -12)
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(height: 16)
-
-                            Picker(selection: $selectedPutContract) {
-                                Text("Select Short").tag(Optional<OptionContract>.none)
-                                ForEach(filteredShortCallContracts(), id: \.self) { c in
-                                    Text(contractMenuRowText(c))
-                                        .font(.body)
-                                        .monospacedDigit()
-                                        .tag(Optional(c))
-                                }
-                            } label: {
-                                HStack {
-                                    Text(selectedPutContract.map { OptionsFormat.number($0.strike) } ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                    Text((selectedPutContract?.mid ?? selectedPutContract?.last).map(OptionsFormat.number) ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                }
-                                .font(.body)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .frame(maxWidth: 260, alignment: .center)
-                        .onChange(of: selectedPutContract) { _, new in
-                            #if DEBUG
-                            if let c = new {
-                                dlog("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
-                            }
-                            #endif
-                            if let c = new {
-                                selectedPutStrike = c.strike
-                                // Populate short leg inputs for payoff calculations
-                                shortCallStrikeText = OptionsFormat.number(c.strike)
-                                if useMarketPremium, let mid = c.mid { shortCallPremiumText = OptionsFormat.number(mid) }
-                                // Enforce lower < upper by nudging lower down if needed
-                                if let lower = selectedCallStrike, lower >= c.strike {
-                                    if let newLower = callStrikes.filter({ $0 < c.strike }).max() {
-                                        selectedCallStrike = newLower
-                                        strikeText = OptionsFormat.number(newLower)
-                                        selectedCallContract = cachedCallContracts.first(where: { $0.strike == newLower })
-                                        if useMarketPremium, let mid2 = selectedCallContract?.mid { premiumText = OptionsFormat.number(mid2) }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Vertical fallback: stack Expiration, Long, Short
-                    VStack(alignment: .leading, spacing: 8) {
-                        // Expiration picker
-                        Picker("Expiration", selection: $selectedExpiration) {
-                            Text("Select Expiration").tag(Optional<Date>.none)
-                            ForEach(expirations, id: \.self) { d in
-                                Text(expirationLabel(d)).tag(Optional(d))
-                            }
-                        }
-                        .onChange(of: selectedExpiration) { _, _ in
-                            if suppressExpirationRefetch {
-                                suppressExpirationRefetch = false
-                            } else {
-                                Task { await refetchForExpiration() }
-                            }
-                        }
-                        .fixedSize(horizontal: true, vertical: false)
-
-                        // Long (lower) call picker
-                        VStack(alignment: .leading, spacing: 4) {
-                            GeometryReader { geo in
-                                let col = geo.size.width / 2
-                                HStack(spacing: 0) {
-                                    Text("Long Call")
-                                        .frame(width: col, alignment: .center)
-                                        .offset(x: 12)
-                                    Text("Mid")
-                                        .frame(width: col, alignment: .center)
-                                        .offset(x: -12)
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(height: 16)
-
-                            Picker(selection: $selectedCallContract) {
-                                Text("Select Long").tag(Optional<OptionContract>.none)
-                                ForEach(filteredLongCallContracts(), id: \.self) { c in
-                                    Text(contractMenuRowText(c))
-                                        .font(.body)
-                                        .monospacedDigit()
-                                        .tag(Optional(c))
-                                }
-                            } label: {
-                                HStack {
-                                    Text(selectedCallContract.map { OptionsFormat.number($0.strike) } ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                    Text((selectedCallContract?.mid ?? selectedCallContract?.last).map(OptionsFormat.number) ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                }
-                                .font(.body)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .frame(maxWidth: 260, alignment: .center)
-                        .onChange(of: selectedCallContract) { _, new in
-                            #if DEBUG
-                            if let c = new {
-                                dlog("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
-                            }
-                            #endif
-                            if let c = new {
-                                selectedCallStrike = c.strike
-                                strikeText = OptionsFormat.number(c.strike)
-                                if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
-                                // Enforce lower < upper by nudging upper up if needed
-                                if let upper = selectedPutStrike, upper <= c.strike {
-                                    if let newUpper = nextHigherStrike(after: c.strike, in: callStrikes) {
-                                        selectedPutStrike = newUpper
-                                        selectedPutContract = cachedCallContracts.first(where: { $0.strike == newUpper })
-                                    }
-                                }
-                            }
-                        }
-
-                        // Short (upper) call picker
-                        VStack(alignment: .leading, spacing: 4) {
-                            GeometryReader { geo in
-                                let col = geo.size.width / 2
-                                HStack(spacing: 0) {
-                                    Text("Short Call")
-                                        .frame(width: col, alignment: .center)
-                                        .offset(x: 12)
-                                    Text("Mid")
-                                        .frame(width: col, alignment: .center)
-                                        .offset(x: -12)
-                                }
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(height: 16)
-
-                            Picker(selection: $selectedPutContract) {
-                                Text("Select Short").tag(Optional<OptionContract>.none)
-                                ForEach(filteredShortCallContracts(), id: \.self) { c in
-                                    Text(contractMenuRowText(c))
-                                        .font(.body)
-                                        .monospacedDigit()
-                                        .tag(Optional(c))
-                                }
-                            } label: {
-                                HStack {
-                                    Text(selectedPutContract.map { OptionsFormat.number($0.strike) } ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                    Text((selectedPutContract?.mid ?? selectedPutContract?.last).map(OptionsFormat.number) ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                }
-                                .font(.body)
-                            }
-                            .frame(maxWidth: .infinity)
-                        }
-                        .frame(maxWidth: 260, alignment: .center)
-                        .onChange(of: selectedPutContract) { _, new in
-                            #if DEBUG
-                            if let c = new {
-                                dlog("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
-                            }
-                            #endif
-                            if let c = new {
-                                selectedPutStrike = c.strike
-                                // Populate short leg inputs for payoff calculations
-                                shortCallStrikeText = OptionsFormat.number(c.strike)
-                                if useMarketPremium, let mid = c.mid { shortCallPremiumText = OptionsFormat.number(mid) }
-                                // Enforce lower < upper by nudging lower down if needed
-                                if let lower = selectedCallStrike, lower >= c.strike {
-                                    if let newLower = callStrikes.filter({ $0 < c.strike }).max() {
-                                        selectedCallStrike = newLower
-                                        strikeText = OptionsFormat.number(newLower)
-                                        selectedCallContract = cachedCallContracts.first(where: { $0.strike == newLower })
-                                        if useMarketPremium, let mid2 = selectedCallContract?.mid { premiumText = OptionsFormat.number(mid2) }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                HStack(spacing: 8) {
-                    if strategy == .singlePut {
-                        // Expiration picker replaced with VStack header + picker
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("      Expiration")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .frame(height: 16)
-                            Picker("Expiration", selection: $selectedExpiration) {
-                                Text("Select Expiration").tag(Optional<Date>.none)
-                                ForEach(expirations, id: \.self) { d in
-                                    Text(expirationLabel(d)).tag(Optional(d))
-                                }
-                            }
-                            .onChange(of: selectedExpiration) { _, _ in
-                                if suppressExpirationRefetch {
-                                    suppressExpirationRefetch = false
-                                } else {
-                                    Task { await refetchForExpiration() }
-                                }
-                            }
-                            .fixedSize(horizontal: true, vertical: false)
-                        }
-                    }
-
-                    // Single Call: Expiration + Call|Mid on one row; picker spans the two right columns
-                    if strategy == .singleCall {
-                        Grid(alignment: .topLeading, horizontalSpacing: 8, verticalSpacing: 6) {
-                            GridRow {
-                                // Expiration picker replaced with VStack header + picker
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text("      Expiration")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                        .frame(height: 16)
-                                    Picker("Expiration", selection: $selectedExpiration) {
-                                        Text("Select Expiration").tag(Optional<Date>.none)
-                                        ForEach(expirations, id: \.self) { d in
-                                            Text(expirationLabel(d)).tag(Optional(d))
-                                        }
-                                    }
-                                    .labelsHidden()
-                                    .onChange(of: selectedExpiration) { _, _ in
-                                        if suppressExpirationRefetch {
-                                            suppressExpirationRefetch = false
-                                        } else {
-                                            Task { await refetchForExpiration() }
-                                        }
-                                    }
-                                    .fixedSize(horizontal: true, vertical: false)
-                                }
-
-                                VStack(alignment: .center, spacing: 4) {
-                                    HStack {
-                                        Text("Call").frame(maxWidth: .infinity, alignment: .center)
-                                        Text("Mid").frame(maxWidth: .infinity, alignment: .center)
-                                    }
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .frame(height: 16)
-
-                                    Picker(selection: $selectedCallContract) {
-                                        Text("Select Call").tag(Optional<OptionContract>.none)
-                                        ForEach(appContractsFor(kind: .call), id: \.self) { c in
-                                            Text(contractMenuRowText(c))
-                                                .font(.body)
-                                                .monospacedDigit()
-                                                .tag(Optional(c))
-                                        }
-                                    } label: {
-                                        HStack {
-                                            Text(selectedCallContract.map { OptionsFormat.number($0.strike) } ?? "—")
-                                                .monospacedDigit()
-                                                .frame(maxWidth: .infinity, alignment: .center)
-                                            Text((selectedCallContract?.mid ?? selectedCallContract?.last).map(OptionsFormat.number) ?? "—")
-                                                .monospacedDigit()
-                                                .frame(maxWidth: .infinity, alignment: .center)
-                                        }
-                                        .font(.body)
-                                    }
-                                }
-                                .gridCellColumns(2) // span the Call + Mid columns
-                            }
-                        }
-                    }
-                    else if strategy == .singlePut {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack {
-                                Text("Put").frame(maxWidth: .infinity, alignment: .center)
-                                Text("Mid").frame(maxWidth: .infinity, alignment: .center)
-                            }
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .frame(height: 16)
-
-                            Picker(selection: $selectedPutContract) {
-                                Text("Select Put").tag(Optional<OptionContract>.none)
-                                ForEach(appContractsFor(kind: .put), id: \.self) { c in
-                                    Text(contractMenuRowText(c))
-                                        .font(.body)
-                                        .monospacedDigit()
-                                        .tag(Optional(c))
-                                }
-                            } label: {
-                                HStack {
-                                    Text(selectedPutContract.map { OptionsFormat.number($0.strike) } ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                    Text((selectedPutContract?.mid ?? selectedPutContract?.last).map(OptionsFormat.number) ?? "—")
-                                        .monospacedDigit()
-                                        .frame(maxWidth: .infinity, alignment: .center)
-                                }
-                                .font(.body)
-                            }
-                            .frame(maxWidth: .infinity)
-
-                        }
-                        .onChange(of: selectedPutContract) { _, new in
-                            #if DEBUG
-                            if let c = new {
-                                dlog("[DEBUG][ContentView] Selected Put -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
-                            }
-                            #endif
-                            if let c = new {
-                                selectedPutStrike = c.strike
-                                strikeText = OptionsFormat.number(c.strike)
-                                if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
-                            }
-                        }
-                    }
-                }
+                contractPickerSection(
+                    title: "Long Call",
+                    selectedStrike: $selectedCallStrike,
+                    contracts: filteredLongCallContracts(),
+                    onSelect: onSelectCallContract
+                )
+                contractPickerSection(
+                    title: "Short Call",
+                    selectedStrike: $selectedPutStrike,
+                    contracts: filteredShortCallContracts(),
+                    onSelect: onSelectShortCallContract
+                )
+            } else if strategy == .bullPutSpread {
+                contractPickerSection(
+                    title: "Long Put",
+                    selectedStrike: $selectedCallStrike,
+                    contracts: filteredLongPutContracts(),
+                    onSelect: onSelectLongPutContract
+                )
+                contractPickerSection(
+                    title: "Short Put",
+                    selectedStrike: $selectedPutStrike,
+                    contracts: filteredShortPutContracts(),
+                    onSelect: onSelectShortPutContract
+                )
             }
 
             Toggle(isOn: $useMarketPremium) {
@@ -1179,6 +948,78 @@ struct ContentView: View {
             .toggleStyle(.switch)
             .font(.callout)
             .foregroundStyle(.secondary)
+        }
+    }
+
+    private func contractPickerSection(
+        title: String,
+        selectedStrike: Binding<Double?>,
+        contracts: [OptionContract],
+        onSelect: @escaping (OptionContract?) -> Void,
+        compact: Bool = false
+    ) -> AnyView {
+        func selectedContractForCurrentStrike() -> OptionContract? {
+            guard let s = selectedStrike.wrappedValue else { return nil }
+            return contracts.first(where: { $0.strike == s })
+        }
+
+        if compact {
+            return AnyView(
+                Picker(selection: selectedStrike) {
+                    Text("Select \(title)").tag(Optional<Double>.none)
+                    ForEach(contracts, id: \.strike) { c in
+                        Text(contractMenuRowText(c))
+                            .font(.body)
+                            .monospacedDigit()
+                            .tag(Optional<Double>(c.strike))
+                    }
+                } label: {
+                    Text("\(selectedStrike.wrappedValue.map(OptionsFormat.number) ?? "—")\u{00A0}·\u{00A0}\((selectedContractForCurrentStrike()?.mid ?? selectedContractForCurrentStrike()?.last).map(OptionsFormat.number) ?? "—")")
+                        .monospacedDigit()
+                        .fixedSize(horizontal: true, vertical: false)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .font(.body)
+                }
+                    .frame(minWidth: 175)
+                    .layoutPriority(1)
+                
+                .onChange(of: selectedStrike.wrappedValue) { _, new in
+                    let chosen = contracts.first(where: { $0.strike == new })
+                    onSelect(chosen)
+                }
+            )
+        } else {
+            return AnyView(
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(title).frame(maxWidth: .infinity, alignment: .center)
+                        Text("Mid").frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(height: 16)
+
+                    Picker(selection: selectedStrike) {
+                        Text("\(title)").tag(Optional<Double>.none)
+                        ForEach(contracts, id: \.strike) { c in
+                            Text(contractMenuRowText(c))
+                                .font(.body)
+                                .monospacedDigit()
+                                .tag(Optional<Double>(c.strike))
+                        }
+                    } label: {
+                        Text("\(selectedStrike.wrappedValue.map(OptionsFormat.number) ?? "—")\u{00A0}·\u{00A0}\((selectedContractForCurrentStrike()?.mid ?? selectedContractForCurrentStrike()?.last).map(OptionsFormat.number) ?? "—")")
+                            .monospacedDigit()
+                            .fixedSize(horizontal: true, vertical: false)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .font(.body)
+                    }
+                    .onChange(of: selectedStrike.wrappedValue) { _, new in
+                        let chosen = contracts.first(where: { $0.strike == new })
+                        onSelect(chosen)
+                    }
+                }
+            )
         }
     }
 
@@ -1281,6 +1122,16 @@ struct ContentView: View {
                             Text("• Net premium is typically a debit (reduced vs. single call)")
                             Text("• Max gain = (upper − lower) × contracts × multiplier − net debit")
                             Text("• Max loss = net debit paid")
+                        }
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    } else if strategy == .bullPutSpread {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Tips for Bull Put Spreads").font(.caption).foregroundStyle(.secondary)
+                            Text("• Buy lower-strike put, sell higher-strike put (same expiration)")
+                            Text("• Net premium is typically a credit (received upfront)")
+                            Text("• Max gain = net credit received")
+                            Text("• Max loss = difference between strikes minus net credit")
                         }
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -1458,6 +1309,8 @@ struct ContentView: View {
             return selectedPutContract
         case .bullCallSpread:
             return nil
+        case .bullPutSpread:
+            return nil
         }
     }
 
@@ -1479,6 +1332,9 @@ struct ContentView: View {
         case .bullCallSpread:
             if selectedCallContract == nil { missing.append("Select a long call contract") }
             if selectedPutContract == nil { missing.append("Select a short call contract") }
+        case .bullPutSpread:
+            if selectedCallContract == nil { missing.append("Select a long put contract") }
+            if selectedPutContract == nil { missing.append("Select a short put contract") }
         }
         // If anything is missing, present a helpful alert and return
         if !missing.isEmpty {
@@ -1490,6 +1346,10 @@ struct ContentView: View {
         }
         if strategy == .bullCallSpread {
             Task { await placeBullCallSpreadOrders() }
+            return
+        }
+        if strategy == .bullPutSpread {
+            Task { await placeBullPutSpreadOrders() }
             return
         }
         // All good — proceed
@@ -1616,6 +1476,106 @@ struct ContentView: View {
         showOrderResultAlert = true
     }
 
+    private func placeBullPutSpreadOrders() async {
+        let expFallback = selectedExpiration ?? expirations.first
+        guard let exp = expFallback else {
+            orderResultText = "Please select an expiration before placing an order."
+            showOrderResultAlert = true
+            return
+        }
+        if selectedExpiration == nil {
+            suppressExpirationRefetch = true
+            selectedExpiration = exp
+        }
+        guard let longPut = selectedCallContract, let shortPut = selectedPutContract else {
+            orderResultText = "Please select both long and short put contracts for the spread."
+            showOrderResultAlert = true
+            return
+        }
+        let symbol = symbolText.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        guard let longLimit = initialLimit(for: longPut, isBuy: true),
+              let shortLimit = initialLimit(for: shortPut, isBuy: false) else {
+            orderResultText = "Unable to determine a limit price for one or both legs (no market prices)."
+            showOrderResultAlert = true
+            return
+        }
+        let tifMapped: TIF = .day
+        let qty = max(1, contracts)
+        let longReq = OrderRequest(
+            symbol: symbol,
+            option: OptionSpec(expiration: exp, right: .put, strike: longPut.strike),
+            side: StrikeGold.Side.buy,
+            quantity: qty,
+            limit: longLimit,
+            tif: tifMapped
+        )
+        let shortReq = OrderRequest(
+            symbol: symbol,
+            option: OptionSpec(expiration: exp, right: .put, strike: shortPut.strike),
+            side: StrikeGold.Side.sell,
+            quantity: qty,
+            limit: shortLimit,
+            tif: tifMapped
+        )
+        let trader = PaperTradingService(quotes: appQuoteService)
+        do {
+            let longResult = try await trader.placeOptionOrder(longReq)
+            let shortResult = try await trader.placeOptionOrder(shortReq)
+            let longSaved = SavedOrder(
+                id: longResult.placed.id,
+                placedAt: Date(),
+                symbol: symbol,
+                expiration: selectedExpiration,
+                right: SavedOrder.Right.put,
+                strike: longPut.strike,
+                side: SavedOrder.Side.buy,
+                quantity: qty,
+                limit: longLimit,
+                tif: SavedOrder.TIF.day,
+                status: (longResult.fill != nil) ? .filled : .working,
+                fillPrice: longResult.fill?.price,
+                fillQuantity: longResult.fill?.quantity,
+                note: nil
+            )
+            await OrderStore.shared.append(longSaved)
+            let shortSaved = SavedOrder(
+                id: shortResult.placed.id,
+                placedAt: Date(),
+                symbol: symbol,
+                expiration: selectedExpiration,
+                right: SavedOrder.Right.put,
+                strike: shortPut.strike,
+                side: SavedOrder.Side.sell,
+                quantity: qty,
+                limit: shortLimit,
+                tif: SavedOrder.TIF.day,
+                status: (shortResult.fill != nil) ? .filled : .working,
+                fillPrice: shortResult.fill?.price,
+                fillQuantity: shortResult.fill?.quantity,
+                note: nil
+            )
+            await OrderStore.shared.append(shortSaved)
+            let longMsg: String = {
+                if let fill = longResult.fill {
+                    return "Long Put (K=\(OptionsFormat.number(longPut.strike))) filled \(fill.quantity) @ \(OptionsFormat.money(fill.price)). ID: \(longResult.placed.id)"
+                } else {
+                    return "Long Put (K=\(OptionsFormat.number(longPut.strike))) working @ \(OptionsFormat.money(longLimit)). ID: \(longResult.placed.id)"
+                }
+            }()
+            let shortMsg: String = {
+                if let fill = shortResult.fill {
+                    return "Short Put (K=\(OptionsFormat.number(shortPut.strike))) filled \(fill.quantity) @ \(OptionsFormat.money(fill.price)). ID: \(shortResult.placed.id)"
+                } else {
+                    return "Short Put (K=\(OptionsFormat.number(shortPut.strike))) working @ \(OptionsFormat.money(shortLimit)). ID: \(shortResult.placed.id)"
+                }
+            }()
+            orderResultText = "Spread orders placed:\n\n\(longMsg)\n\n\(shortMsg)"
+        } catch {
+            orderResultText = "Spread order failed: \(error.localizedDescription)"
+        }
+        showOrderResultAlert = true
+    }
+
     private func prepareAndStartOrderFlow() async {
         // Require expiration to be selected; do not auto-assign here
         guard selectedExpiration != nil else { return }
@@ -1681,6 +1641,24 @@ struct ContentView: View {
                     }
                 }
             }
+        case .bullPutSpread:
+            if selectedCallContract == nil || selectedPutContract == nil {
+                if let lower = nearestStrike(to: price, in: putStrikes) {
+                    selectedCallStrike = lower
+                    strikeText = OptionsFormat.number(lower)
+                    selectedCallContract = cachedPutContracts.first(where: { $0.strike == lower })
+                    if useMarketPremium, let mid = selectedCallContract?.mid {
+                        premiumText = OptionsFormat.number(mid)
+                    }
+                    let upper = nextHigherStrike(after: lower, in: putStrikes) ?? lower
+                    selectedPutStrike = upper
+                    selectedPutContract = cachedPutContracts.first(where: { $0.strike == upper })
+                    shortCallStrikeText = OptionsFormat.number(upper)
+                    if useMarketPremium, let mid = selectedPutContract?.mid {
+                        shortCallPremiumText = OptionsFormat.number(mid)
+                    }
+                }
+            }
         }
     }
 
@@ -1692,6 +1670,8 @@ struct ContentView: View {
         case .singlePut:
             return hasExpiration && selectedPutContract != nil
         case .bullCallSpread:
+            return hasExpiration && selectedCallContract != nil && selectedPutContract != nil
+        case .bullPutSpread:
             return hasExpiration && selectedCallContract != nil && selectedPutContract != nil
         }
     }
@@ -1916,6 +1896,115 @@ struct ContentView: View {
         return filtered.isEmpty ? all : filtered
     }
 
+    private func filteredLongPutContracts() -> [OptionContract] {
+        let all = appContractsFor(kind: .put)
+        guard let upper = selectedPutStrike else { return all }
+        if let lower = selectedCallStrike, upper <= lower { return all }
+        let minStrike = all.map { $0.strike }.min() ?? .leastNonzeroMagnitude
+        if upper <= minStrike { return all }
+        let filtered = all.filter { $0.strike < upper }
+        return filtered.isEmpty ? all : filtered
+    }
+
+    private func filteredShortPutContracts() -> [OptionContract] {
+        let all = appContractsFor(kind: .put)
+        guard let lower = selectedCallStrike else { return all }
+        let maxStrike = all.map { $0.strike }.max() ?? .greatestFiniteMagnitude
+        if lower >= maxStrike { return all }
+        let filtered = all.filter { $0.strike > lower }
+        return filtered.isEmpty ? all : filtered
+    }
+
+    private func onSelectCallContract(_ c: OptionContract?) {
+        #if DEBUG
+        if let c = c {
+            dlog("[DEBUG][ContentView] Selected Long Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+        }
+        #endif
+        guard let c = c else { return }
+        selectedCallStrike = c.strike
+        strikeText = OptionsFormat.number(c.strike)
+        if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
+        // If building a spread, enforce lower < upper by nudging upper up if needed
+        if strategy == .bullCallSpread, let upper = selectedPutStrike, upper <= c.strike {
+            if let newUpper = nextHigherStrike(after: c.strike, in: callStrikes) {
+                selectedPutStrike = newUpper
+                selectedPutContract = cachedCallContracts.first(where: { $0.strike == newUpper })
+            }
+        }
+    }
+
+    private func onSelectShortCallContract(_ c: OptionContract?) {
+        #if DEBUG
+        if let c = c {
+            dlog("[DEBUG][ContentView] Selected Short Call -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+        }
+        #endif
+        guard let c = c else { return }
+        selectedPutStrike = c.strike
+        shortCallStrikeText = OptionsFormat.number(c.strike)
+        if useMarketPremium, let mid = c.mid { shortCallPremiumText = OptionsFormat.number(mid) }
+        // If building a spread, enforce lower < upper by nudging lower down if needed
+        if strategy == .bullCallSpread, let lower = selectedCallStrike, lower >= c.strike {
+            if let newLower = callStrikes.filter({ $0 < c.strike }).max() {
+                selectedCallStrike = newLower
+                strikeText = OptionsFormat.number(newLower)
+                selectedCallContract = cachedCallContracts.first(where: { $0.strike == newLower })
+                if useMarketPremium, let mid2 = selectedCallContract?.mid { premiumText = OptionsFormat.number(mid2) }
+            }
+        }
+    }
+
+    private func onSelectPutContract(_ c: OptionContract?) {
+        #if DEBUG
+        if let c = c {
+            dlog("[DEBUG][ContentView] Selected Put -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+        }
+        #endif
+        guard let c = c else { return }
+        selectedPutStrike = c.strike
+        strikeText = OptionsFormat.number(c.strike)
+        if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
+    }
+
+    private func onSelectLongPutContract(_ c: OptionContract?) {
+        #if DEBUG
+        if let c = c {
+            dlog("[DEBUG][ContentView] Selected Long Put -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+        }
+        #endif
+        guard let c = c else { return }
+        selectedCallStrike = c.strike
+        strikeText = OptionsFormat.number(c.strike)
+        if useMarketPremium, let mid = c.mid { premiumText = OptionsFormat.number(mid) }
+        if strategy == .bullPutSpread, let upper = selectedPutStrike, upper <= c.strike {
+            if let newUpper = nextHigherStrike(after: c.strike, in: putStrikes) {
+                selectedPutStrike = newUpper
+                selectedPutContract = cachedPutContracts.first(where: { $0.strike == newUpper })
+            }
+        }
+    }
+
+    private func onSelectShortPutContract(_ c: OptionContract?) {
+        #if DEBUG
+        if let c = c {
+            dlog("[DEBUG][ContentView] Selected Short Put -> strike=\(c.strike) bid=\(String(describing: c.bid)) ask=\(String(describing: c.ask)) last=\(String(describing: c.last)) mid=\(String(describing: c.mid))")
+        }
+        #endif
+        guard let c = c else { return }
+        selectedPutStrike = c.strike
+        shortCallStrikeText = OptionsFormat.number(c.strike)
+        if useMarketPremium, let mid = c.mid { shortCallPremiumText = OptionsFormat.number(mid) }
+        if strategy == .bullPutSpread, let lower = selectedCallStrike, lower >= c.strike {
+            if let newLower = putStrikes.filter({ $0 < c.strike }).max() {
+                selectedCallStrike = newLower
+                strikeText = OptionsFormat.number(newLower)
+                selectedCallContract = cachedPutContracts.first(where: { $0.strike == newLower })
+                if useMarketPremium, let mid2 = selectedCallContract?.mid { premiumText = OptionsFormat.number(mid2) }
+            }
+        }
+    }
+
     private func lookupSymbol() async {
         await MainActor.run { isFetching = true; fetchError = nil }
 
@@ -2015,7 +2104,7 @@ struct ContentView: View {
                                 premiumText = OptionsFormat.number(mid)
                             }
                         }
-                    } else {
+                    } else if strategy == .bullCallSpread {
                         // Bull Call Spread: choose lower ~ATM and upper next higher if available
                         if let lower = nearestStrike(to: price, in: callStrikes) {
                             selectedCallStrike = lower
@@ -2027,6 +2116,23 @@ struct ContentView: View {
                             let upper = nextHigherStrike(after: lower, in: callStrikes) ?? lower
                             selectedPutStrike = upper
                             selectedPutContract = cachedCallContracts.first(where: { $0.strike == upper })
+                            shortCallStrikeText = OptionsFormat.number(upper)
+                            if useMarketPremium, let mid = selectedPutContract?.mid {
+                                shortCallPremiumText = OptionsFormat.number(mid)
+                            }
+                        }
+                    }
+                    else if strategy == .bullPutSpread {
+                        if let lower = nearestStrike(to: price, in: putStrikes) {
+                            selectedCallStrike = lower
+                            strikeText = OptionsFormat.number(lower)
+                            selectedCallContract = cachedPutContracts.first(where: { $0.strike == lower })
+                            if useMarketPremium, let mid = selectedCallContract?.mid {
+                                premiumText = OptionsFormat.number(mid)
+                            }
+                            let upper = nextHigherStrike(after: lower, in: putStrikes) ?? lower
+                            selectedPutStrike = upper
+                            selectedPutContract = cachedPutContracts.first(where: { $0.strike == upper })
                             shortCallStrikeText = OptionsFormat.number(upper)
                             if useMarketPremium, let mid = selectedPutContract?.mid {
                                 shortCallPremiumText = OptionsFormat.number(mid)
@@ -2123,7 +2229,7 @@ struct ContentView: View {
                             premiumText = OptionsFormat.number(mid)
                         }
                     }
-                } else {
+                } else if strategy == .bullCallSpread {
                     if let lower = nearestStrike(to: price, in: callStrikes) {
                         selectedCallStrike = lower
                         strikeText = OptionsFormat.number(lower)
@@ -2134,6 +2240,22 @@ struct ContentView: View {
                         let upper = nextHigherStrike(after: lower, in: callStrikes) ?? lower
                         selectedPutStrike = upper
                         selectedPutContract = cachedCallContracts.first(where: { $0.strike == upper })
+                        shortCallStrikeText = OptionsFormat.number(upper)
+                        if useMarketPremium, let mid = selectedPutContract?.mid {
+                            shortCallPremiumText = OptionsFormat.number(mid)
+                        }
+                    }
+                } else if strategy == .bullPutSpread {
+                    if let lower = nearestStrike(to: price, in: putStrikes) {
+                        selectedCallStrike = lower
+                        strikeText = OptionsFormat.number(lower)
+                        selectedCallContract = cachedPutContracts.first(where: { $0.strike == lower })
+                        if useMarketPremium, let mid = selectedCallContract?.mid {
+                            premiumText = OptionsFormat.number(mid)
+                        }
+                        let upper = nextHigherStrike(after: lower, in: putStrikes) ?? lower
+                        selectedPutStrike = upper
+                        selectedPutContract = cachedPutContracts.first(where: { $0.strike == upper })
                         shortCallStrikeText = OptionsFormat.number(upper)
                         if useMarketPremium, let mid = selectedPutContract?.mid {
                             shortCallPremiumText = OptionsFormat.number(mid)
@@ -2240,6 +2362,10 @@ struct ContentView: View {
             let longHas = (selectedCallContract?.mid ?? selectedCallContract?.last) != nil
             let shortHas = (selectedPutContract?.mid ?? selectedPutContract?.last) != nil
             return longHas || shortHas
+        case .bullPutSpread:
+            let longHas = (selectedCallContract?.mid ?? selectedCallContract?.last) != nil
+            let shortHas = (selectedPutContract?.mid ?? selectedPutContract?.last) != nil
+            return longHas || shortHas
         }
     }
 
@@ -2283,6 +2409,7 @@ struct ContentView: View {
         case .singleCall: savedKind = .singleCall
         case .singlePut: savedKind = .singlePut
         case .bullCallSpread: savedKind = .bullCallSpread
+        case .bullPutSpread: savedKind = .bullPutSpread
         }
 
         // Map working legs (OptionLeg) into SavedLegs for persistence
@@ -2345,6 +2472,18 @@ struct ContentView: View {
                 netLabel = "Net Even"
             }
             return "Underlying ($\(underlyingStr)), Lower Strike (\(kLower)), Upper Strike (\(kUpper)), Long Premium (+\(premLower)), Short Premium (-\(premUpper)), \(netLabel), Contracts (\(qty) × \(mult))"
+        case .bullPutSpread:
+            let net = multiAnalysis.totalDebit
+            let netAbs = OptionsFormat.number(abs(net))
+            let netLabel: String
+            if net > 0 {
+                netLabel = "Net Debit (+\(netAbs))"
+            } else if net < 0 {
+                netLabel = "Net Credit (-\(netAbs))"
+            } else {
+                netLabel = "Net Even"
+            }
+            return "Underlying ($\(underlyingStr)), Lower Strike (\(kLower)), Upper Strike (\(kUpper)), Long Premium (+\(premLower)), Short Premium (-\(premUpper)), \(netLabel), Contracts (\(qty) × \(mult))"
         }
     }
 
@@ -2370,6 +2509,8 @@ struct ContentView: View {
         case .bullCallSpread:
             // Always long lower, short upper in this UI
             return "Bull call spread: Below $\(lowerK) → lose net debit; between $\(lowerK) and $\(upperK) → approx (underlying price − $\(lowerK)) × \(mult) minus net debit; above $\(upperK) → capped ≈ ($\(upperK) − $\(lowerK)) × \(mult) minus net debit."
+        case .bullPutSpread:
+            return "Bull put spread: Above $\(upperK) → keep net credit; between $\(lowerK) and $\(upperK) → approx net credit minus (K − UL) × \(mult); below $\(lowerK) → capped loss ≈ ($\(upperK) − $\(lowerK)) × \(mult) − net credit."
         }
     }
 
@@ -2381,6 +2522,8 @@ struct ContentView: View {
             return "Put (" + (side == .buy ? "Long" : "Short") + ") → Above/Below Strike at Expiration"
         case .bullCallSpread:
             return "Bull Call Spread → Above/Below K at Expiration"
+        case .bullPutSpread:
+            return "Bull Put Spread → Above/Below K at Expiration"
         }
     }
 
@@ -2390,6 +2533,9 @@ struct ContentView: View {
             let kLower = OptionsFormat.number(lowerStrike)
             return "Above $\(kLower): (UL = underlying, K = strike)"
         case .bullCallSpread:
+            let kUpper = OptionsFormat.number(upperStrike)
+            return "Above $\(kUpper): (UL = underlying, K = strike)"
+        case .bullPutSpread:
             let kUpper = OptionsFormat.number(upperStrike)
             return "Above $\(kUpper): (UL = underlying, K = strike)"
         }
@@ -2419,6 +2565,11 @@ struct ContentView: View {
             let netAbs = OptionsFormat.number(abs(net))
             let netLabel = net > 0 ? "+" + netAbs : (net < 0 ? "-" + netAbs : netAbs)
             return "Capped ≈ ($\(kUpper) − $\(kLower)) × \(mult) − net debit/credit (\(netLabel) × \(mult))."
+        case .bullPutSpread:
+            let net = multiAnalysis.totalDebit
+            let netAbs = OptionsFormat.number(abs(net))
+            let netLabel = net > 0 ? "+" + netAbs : (net < 0 ? "-" + netAbs : netAbs)
+            return "Keep net credit (\(netLabel) × \(mult))."
         }
     }
 
@@ -2430,11 +2581,15 @@ struct ContentView: View {
         case .bullCallSpread:
             let kLower = OptionsFormat.number(lowerStrike)
             return "Below $\(kLower):"
+        case .bullPutSpread:
+            let kLower = OptionsFormat.number(lowerStrike)
+            return "Below $\(kLower):"
         }
     }
 
     private var educationBelowBullet: String {
         let kLower = OptionsFormat.number(lowerStrike)
+        let kUpper = OptionsFormat.number(upperStrike)
         let ul = OptionsFormat.number(underlyingNow)
         let prem = OptionsFormat.number(lowerPremium)
         let mult = Int(multiplier)
@@ -2456,6 +2611,11 @@ struct ContentView: View {
             let netAbs = OptionsFormat.number(abs(net))
             let netLabel = net > 0 ? "+" + netAbs : (net < 0 ? "-" + netAbs : netAbs)
             return "Lose net debit/credit (\(netLabel) × \(mult))."
+        case .bullPutSpread:
+            let net = multiAnalysis.totalDebit
+            let netAbs = OptionsFormat.number(abs(net))
+            let netLabel = net > 0 ? "+" + netAbs : (net < 0 ? "-" + netAbs : netAbs)
+            return "Capped loss ≈ ($\(kUpper) − $\(kLower)) × \(mult) − net credit (\(netLabel) × \(mult))."
         }
     }
 
@@ -2467,6 +2627,8 @@ struct ContentView: View {
             return false
         case .bullCallSpread:
             return false
+        case .bullPutSpread:
+            return false
         }
     }
 
@@ -2477,6 +2639,8 @@ struct ContentView: View {
         case .singlePut:
             return true
         case .bullCallSpread:
+            return false
+        case .bullPutSpread:
             return false
         }
     }
@@ -2573,7 +2737,6 @@ struct ContentView: View {
         orderContract = nil
     }
 }
-
 #Preview {
     ContentView()
 }

@@ -68,9 +68,31 @@ struct SettingsView: View {
 
                 Section("Alpaca (optional)") {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Bring your own Alpaca Market Data key if you want automatic quotes as a backup to manual inputs.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+//                        Text("Bring your own Alpaca Market Data key if you want automatic quotes as a backup to manual inputs.")
+//                            .font(.caption)
+//                            .foregroundStyle(.secondary)
+                        DisclosureGroup("Why we use Alpaca") {
+                            Text("We don’t receive compensation or referral fees. Among mainstream providers, Alpaca is the only one that permits free distribution of options data for apps like ours. To stay compliant, StrikeGold supports Alpaca (bring your own keys) for automatic option chains and quotes. Manual mode remains fully available.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .font(.caption)
+                        
+                        HStack(alignment: .top, spacing: 6) {
+                           
+                            Image(systemName: "info.circle")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("To get real option data (option chains and quotes), you'll need an Alpaca account. Paste your API keys here after you sign up.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Link("Open an Alpaca account", destination: URL(string: "https://alpaca.markets/")!)
+                                    .font(.caption2)
+                            }
+                        }
                         HStack(alignment: .firstTextBaseline) {
                             TextField("API Key ID", text: $viewModel.alpacaKey)
                                 .textInputAutocapitalization(.never)
