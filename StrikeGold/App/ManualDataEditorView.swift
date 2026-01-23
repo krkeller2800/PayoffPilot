@@ -265,20 +265,40 @@ struct ManualDataEditorView: View {
         let headerLine = hasHeader ? lines[headerIdx!].lowercased() : lines.first!.lowercased()
         // Tokenize a line by comma or tab or runs of 2+ spaces
         func split(_ line: String) -> [String] {
-            // Split by comma, tab, or runs of 2+ spaces (to handle table copies robustly)
             var tokens: [String] = []
-            let primary = line.components(separatedBy: CharacterSet(charactersIn: ",\t"))
-            for var chunk in primary {
-                // Convert any run of 2+ spaces into a single tab, iteratively
-                while chunk.contains("  ") { chunk = chunk.replacingOccurrences(of: "  ", with: "\t") }
-                while chunk.contains("\t\t") { chunk = chunk.replacingOccurrences(of: "\t\t", with: "\t") }
-                let parts = chunk.components(separatedBy: "\t")
-                for p in parts {
-                    let t = p.trimmingCharacters(in: .whitespaces)
-                    if !t.isEmpty { tokens.append(t) }
+            var current = ""
+            var inQuotes = false
+            var i = line.startIndex
+            while i < line.endIndex {
+                let ch = line[i]
+                if ch == "\"" { // double quote
+                    inQuotes.toggle()
+                } else if (ch == "," || ch == "\t") && !inQuotes {
+                    let trimmed = current.trimmingCharacters(in: .whitespaces)
+                    if !trimmed.isEmpty { tokens.append(trimmed) }
+                    current = ""
+                } else {
+                    current.append(ch)
+                }
+                i = line.index(after: i)
+            }
+            let trimmed = current.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty { tokens.append(trimmed) }
+
+            // Further split tokens that use runs of 2+ spaces as separators (table copies)
+            var finalTokens: [String] = []
+            for t in tokens {
+                if t.contains("  ") {
+                    var chunk = t
+                    while chunk.contains("  ") { chunk = chunk.replacingOccurrences(of: "  ", with: "\t") }
+                    while chunk.contains("\t\t") { chunk = chunk.replacingOccurrences(of: "\t\t", with: "\t") }
+                    let parts = chunk.components(separatedBy: "\t").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                    finalTokens.append(contentsOf: parts)
+                } else {
+                    finalTokens.append(t)
                 }
             }
-            return tokens
+            return finalTokens
         }
         func cleanDouble(_ s: String?) -> Double? {
             guard let s = s else { return nil }
@@ -403,16 +423,22 @@ struct ManualDataEditorView: View {
             var ask: Double? = nil
             var kindDetected: OptionContract.Kind? = nil
             var parsedExpiration: Date? = nil
-            if let sIdx = strikeIdx, sIdx < mutableParts.count { strike = cleanDouble(mutableParts[sIdx]) }
-            if let lIdx = lastIdx, lIdx < mutableParts.count { last = cleanDouble(mutableParts[lIdx]) }
-            if let bIdx = bidIdx,  bIdx < mutableParts.count { bid  = cleanDouble(mutableParts[bIdx]) }
-            if let aIdx = askIdx,  aIdx < mutableParts.count { ask  = cleanDouble(mutableParts[aIdx]) }
-            if let tIdx = typeIdx, tIdx < mutableParts.count {
-                let t = mutableParts[tIdx].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if let sIdx = strikeIdx, sIdx < parts.count { strike = cleanDouble(parts[sIdx]) }
+            if let lIdx = lastIdx, lIdx < parts.count { last = cleanDouble(parts[lIdx]) }
+            if let bIdx = bidIdx,  bIdx < parts.count { bid  = cleanDouble(parts[bIdx]) }
+            if let aIdx = askIdx,  aIdx < parts.count { ask  = cleanDouble(parts[aIdx]) }
+            if let tIdx = typeIdx, tIdx < parts.count {
+                let t = parts[tIdx].trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
                 if t.hasPrefix("c") { kindDetected = .call } else if t.hasPrefix("p") { kindDetected = .put }
             }
-            if let eIdx = expirationIdx, eIdx < mutableParts.count {
-                parsedExpiration = parseExpirationDate(mutableParts[eIdx])
+            if let eIdx = expirationIdx, eIdx < parts.count {
+                // Try direct parse first
+                parsedExpiration = parseExpirationDate(parts[eIdx])
+                // If the date was split on a comma (e.g., "Jan 17, 2025" -> ["Jan 17", "2025"]), try combining with the next token
+                if parsedExpiration == nil, eIdx + 1 < parts.count {
+                    let combined = parts[eIdx] + ", " + parts[eIdx + 1]
+                    parsedExpiration = parseExpirationDate(combined)
+                }
             }
             if strike == nil, let s = occStrike { strike = s }
             if parsedExpiration == nil, let e = occExp { parsedExpiration = e }
@@ -721,7 +747,7 @@ struct ManualDataEditorView: View {
                     }
                     HStack(spacing: 6) {
                         Image(systemName: "info.circle").font(.caption2).foregroundStyle(.secondary)
-                        Text("Supports headers: Strike, Last, Bid, Ask, Type. You can override Call/Put in the preview.")
+                        Text("Supports headers: Strike, Last, Bid, Ask, Type, Expiration. You can override Call/Put in the preview.")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1014,12 +1040,56 @@ struct ManualDataEditorView: View {
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Close") { showChainViewer = false } }
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Clear") {
-                            Task { @MainActor in
-                                self.allExpirations = []
-                                self.allChains = [:]
-                                self.chainSearchText = ""
-                                self.statusMessage = "Cleared option chain viewer."
+                        Button("Delete") {
+                            let sym = symbol.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+                            Task {
+                                let expirations = allExpirations
+                                let chains = allChains
+                                for exp in expirations {
+                                    let existing = chains[exp]
+                                    switch chainFilterSelection {
+                                    case 1: // Calls only
+                                        let puts = existing?.puts ?? []
+                                        await ManualDataProvider.shared.setOptionChain(symbol: sym, expiration: exp, calls: [], puts: puts)
+                                    case 2: // Puts only
+                                        let calls = existing?.calls ?? []
+                                        await ManualDataProvider.shared.setOptionChain(symbol: sym, expiration: exp, calls: calls, puts: [])
+                                    default: // All
+                                        await ManualDataProvider.shared.setOptionChain(symbol: sym, expiration: exp, calls: [], puts: [])
+                                    }
+                                }
+                                await MainActor.run {
+                                    switch chainFilterSelection {
+                                    case 1: // Calls
+                                        for exp in expirations {
+                                            if let tuple = allChains[exp] {
+                                                allChains[exp] = (calls: [], puts: tuple.puts)
+                                            }
+                                        }
+                                    case 2: // Puts
+                                        for exp in expirations {
+                                            if let tuple = allChains[exp] {
+                                                allChains[exp] = (calls: tuple.calls, puts: [])
+                                            }
+                                        }
+                                    default: // All
+                                        allChains = [:]
+                                    }
+                                    // Remove expirations that are now empty
+                                    allExpirations = allExpirations.filter { exp in
+                                        if let t = allChains[exp] {
+                                            return !(t.calls.isEmpty && t.puts.isEmpty)
+                                        } else {
+                                            return false
+                                        }
+                                    }
+                                    if chainFilterSelection == 0 && allChains.isEmpty {
+                                        allExpirations = []
+                                    }
+                                    statusMessage = "Deleted viewed option chain data for \(sym)."
+                                }
+                                // Refresh the main editor list to reflect deletions
+                                await refreshChain()
                             }
                         }
                     }
@@ -1305,6 +1375,13 @@ struct ManualDataEditorView: View {
         // yyyyMMdd
         let ymdc = DateFormatter(); ymdc.dateFormat = "yyyyMMdd"; ymdc.timeZone = TimeZone(secondsFromGMT: 0)
         if let d = ymdc.date(from: trimmed) { return d }
+
+        // "MMM d, yyyy" and "MMMM d, yyyy"
+        let mmmDY = DateFormatter(); mmmDY.dateFormat = "MMM d, yyyy"; mmmDY.timeZone = TimeZone(secondsFromGMT: 0); mmmDY.locale = Locale(identifier: "en_US_POSIX")
+        if let d = mmmDY.date(from: trimmed) { return d }
+        let mmmmDY = DateFormatter(); mmmmDY.dateFormat = "MMMM d, yyyy"; mmmmDY.timeZone = TimeZone(secondsFromGMT: 0); mmmmDY.locale = Locale(identifier: "en_US_POSIX")
+        if let d = mmmmDY.date(from: trimmed) { return d }
+
         return nil
     }
 
@@ -1498,7 +1575,11 @@ struct ManualDataEditorView: View {
                 .frame(width: 14)
             Text(OptionsFormat.number(contract.strike))
                 .monospacedDigit()
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .allowsTightening(true)
+                .layoutPriority(1)
+            Spacer(minLength: 8)
             let bidText = contract.bid.map(OptionsFormat.number) ?? "—"
             let askText = contract.ask.map(OptionsFormat.number) ?? "—"
             let lastText = contract.last.map(OptionsFormat.number) ?? "—"
@@ -1507,10 +1588,18 @@ struct ManualDataEditorView: View {
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
                 .lineLimit(1)
-            Spacer()
+                .minimumScaleFactor(0.6)
+                .allowsTightening(true)
+                .layoutPriority(2)
+            Spacer(minLength: 8)
             Text(expiration.formatted(.dateTime.month(.abbreviated).day()))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .allowsTightening(true)
+                .fixedSize(horizontal: true, vertical: false)
+                .layoutPriority(3)
         }
     }
 }
